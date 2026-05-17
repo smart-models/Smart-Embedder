@@ -1,0 +1,14 @@
+# Compose override: disables GPU access for CPU execution.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
+#
+# `!reset` is a Compose Spec tag (v2.24+) that removes this key during merge.
+# Generic YAML linters may report it as an "unresolved tag"; that warning is
+# cosmetic, and Docker Compose parses it correctly.
+services:
+  embedder:
+    environment:
+      CUDA_VISIBLE_DEVICES: "-1"
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []

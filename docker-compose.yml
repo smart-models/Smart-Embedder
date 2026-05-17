@@ -1,0 +1,67 @@
+name: bge-m3-embedder-reranker
+
+services:
+  embedder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bge-m3-embedder-reranker:latest
+    container_name: bge-m3-embedder-reranker
+    init: true
+    ports:
+      # Bind localhost only; remove the 127.0.0.1: prefix to expose on LAN.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Persist the HF model cache to avoid re-downloads on restart (~3 GB).
+      - hf_model_cache:/app/model_cache
+    environment:
+      HF_HOME: /app/model_cache
+      HF_HUB_CACHE: /app/model_cache/hub
+      MAX_INPUT_LENGTH: ${MAX_INPUT_LENGTH:-2048}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+      MAX_SENTENCES_PER_REQUEST: ${MAX_SENTENCES_PER_REQUEST:-128}
+      MAX_SENTENCE_CHARS: ${MAX_SENTENCE_CHARS:-20000}
+      MAX_TOTAL_CHARS_PER_REQUEST: ${MAX_TOTAL_CHARS_PER_REQUEST:-250000}
+      MAX_RERANK_PASSAGES: ${MAX_RERANK_PASSAGES:-128}
+      MAX_RERANK_TEXT_CHARS: ${MAX_RERANK_TEXT_CHARS:-20000}
+      MAX_RERANK_TOTAL_CHARS: ${MAX_RERANK_TOTAL_CHARS:-250000}
+      API_TOKEN: ${API_TOKEN:-}
+      # Tuned on RTX 4060 8GB: peak ~30-44 req/s @ conc=8
+      MAX_QUEUE_SIZE: ${MAX_QUEUE_SIZE:-200}
+      RERANK_MAX_QUEUE: ${RERANK_MAX_QUEUE:-32}
+      RERANK_GPU_TIMEOUT: ${RERANK_GPU_TIMEOUT:-15}
+      RATE_LIMIT_REQUESTS_PER_MINUTE: ${RATE_LIMIT_REQUESTS_PER_MINUTE:-3600}
+      RATE_LIMIT_BURST_SIZE: ${RATE_LIMIT_BURST_SIZE:-120}
+    shm_size: "2gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    stop_grace_period: 35s
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  hf_model_cache:
+    name: ${HF_MODEL_CACHE_VOLUME:-bge-m3-embedder-reranker-hf-cache}

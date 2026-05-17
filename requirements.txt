@@ -1,0 +1,29 @@
+# FastAPI and web server
+fastapi==0.136.1
+uvicorn[standard]==0.34.1
+pydantic==2.12.5
+
+# BGE models. Keep this pin: 1.3+ regresses reranker performance.
+# Verify performance before upgrading.
+# Issue: https://github.com/FlagOpen/FlagEmbedding/issues/1233
+FlagEmbedding==1.2.10
+sentence-transformers==2.7.0
+
+# Monitoring
+prometheus-client==0.25.0
+
+# Test
+httpx==0.28.1
+
+# Hugging Face stack compatible with FlagEmbedding 1.2.10 and torch 2.7.0
+numpy==1.26.4
+transformers==4.57.3
+peft==0.15.2
+tokenizers==0.22.2
+
+# PyTorch with CUDA 12.6 support (stable 2.7.0)
+# Dockerfile installs torch in a separate layer first; this entry is then a no-op for Docker
+# but ensures local `pip install -r requirements.txt` pulls the correct CUDA wheel.
+# For CPU-only local install, override with: pip install torch==2.7.0
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.7.0+cu126
