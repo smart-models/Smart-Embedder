@@ -49,6 +49,27 @@ ask_gpu_or_cpu() {
     esac
 }
 
+ask_dense_embedding_model() {
+    echo "======================================" >&2
+    echo "  Select dense embedding backend" >&2
+    echo "======================================" >&2
+    echo "" >&2
+    echo "Do you want dense embeddings to use:" >&2
+    echo "  [1] BGE  (BAAI/bge-m3)" >&2
+    echo "  [2] QWEN (Qwen/Qwen3-Embedding-0.6B)" >&2
+    echo "" >&2
+    read -r -p "Enter choice (1 or 2): " choice >&2
+
+    case "$choice" in
+        2) echo "Qwen/Qwen3-Embedding-0.6B" ;;
+        1) echo "BAAI/bge-m3" ;;
+        *)
+            echo "[WARNING] Invalid choice, defaulting dense embeddings to BGE" >&2
+            echo "BAAI/bge-m3"
+            ;;
+    esac
+}
+
 ask_reranker() {
     echo "======================================" >&2
     echo "  Select reranker" >&2
@@ -83,6 +104,9 @@ if [[ "$DEVICE" != "cpu" && "$DEVICE" != "gpu" && "$DEVICE" != "auto" ]]; then
     exit 1
 fi
 
+DENSE_EMBEDDING_MODEL="$(ask_dense_embedding_model)"
+export DENSE_EMBEDDING_MODEL
+
 RERANKER_MODEL="$(ask_reranker)"
 export RERANKER_MODEL
 
@@ -107,6 +131,7 @@ echo "========================================"
 echo "  BGE-M3 Embedding Server"
 echo "  Mode:   $MODE"
 echo "  Device: $DEVICE"
+echo "  Dense:  $DENSE_EMBEDDING_MODEL"
 echo "  Reranker: $RERANKER_MODEL"
 echo "========================================"
 echo ""

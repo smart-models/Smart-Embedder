@@ -23,6 +23,23 @@ if not "%MODE%"=="local" if not "%MODE%"=="docker" goto :usage
 if not "%DEVICE%"=="cpu" if not "%DEVICE%"=="gpu" if not "%DEVICE%"=="auto" goto :usage
 
 echo ======================================
+echo  Select dense embedding backend
+echo ======================================
+echo.
+echo Do you want dense embeddings to use:
+echo   [1] BGE  ^(BAAI/bge-m3^)
+echo   [2] QWEN ^(Qwen/Qwen3-Embedding-0.6B^)
+echo.
+set /p dense_choice="Enter choice ^(1 or 2^): "
+if "%dense_choice%"=="2" (
+    set "DENSE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B"
+) else (
+    if not "%dense_choice%"=="" if not "%dense_choice%"=="1" echo [WARNING] Invalid choice, defaulting dense embeddings to BGE
+    set "DENSE_EMBEDDING_MODEL=BAAI/bge-m3"
+)
+echo.
+
+echo ======================================
 echo  Select reranker
 echo ======================================
 echo.
@@ -87,6 +104,7 @@ echo ========================================
 echo  BGE-M3 Embedding Server
 echo  Mode:   %MODE%
 echo  Device: %DEVICE%
+echo  Dense:  %DENSE_EMBEDDING_MODEL%
 echo  Reranker: %RERANKER_MODEL%
 echo ========================================
 echo.
