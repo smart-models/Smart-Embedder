@@ -4,7 +4,7 @@ High-performance FastAPI server for BGE-M3 embeddings and selectable reranking:
 
 | Feature | Detail |
 |---|---|
-| **Embedding** | `BAAI/bge-m3` - dense, sparse, ColBERT vectors |
+| **Embeddings** | BGE-M3 dense/sparse/ColBERT by default; optional Qwen3 dense with BGE-M3 sparse and ColBERT |
 | **Reranking** | Interactive startup choice: `BAAI/bge-reranker-v2-m3` or `Qwen/Qwen3-Reranker-0.6B` |
 | **Authentication** | Optional Bearer token on non-public endpoints |
 | **Rate Limiting** | Token bucket, 3600 req/min per IP, burst 120 |
@@ -46,8 +46,10 @@ start_server.bat [local|docker] [cpu|gpu|auto]
 
 Arguments are case-insensitive. Built-in validation: unrecognized parameters print usage and exit with code 1.
 
-Both startup scripts always prompt for the reranker before launching the server.
-Choose BGE to preserve the original behavior, or QWEN to use `Qwen/Qwen3-Reranker-0.6B`.
+Startup asks two independent model questions:
+
+1. Dense embedding backend: choose BGE for current all-BGE embeddings, or QWEN to return Qwen dense vectors while keeping BGE sparse and ColBERT vectors.
+2. Reranker backend: choose BGE or QWEN for `/rerank`.
 
 **`local` mode**: requires `.venv` already created (see step 1). The script activates venv, checks for `uvicorn`, installs dependencies if missing, then starts the server.
 
@@ -150,7 +152,7 @@ sudo systemctl restart docker
 # Verify CUDA tag exists before building
 docker pull nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
-# Build and GPU startup (first time: downloads embedding and selected reranker models)
+# Build and GPU startup (first time: downloads selected embedding and reranker models)
 docker compose up --build
 
 # Or via bat wrapper (Windows)
@@ -173,7 +175,7 @@ Models are saved in the default named volume
 `bge-m3-embedder-reranker-hf-cache` and mounted at `/app/model_cache`;
 subsequent restarts do not re-download them.
 
-The first Docker startup with QWEN selected downloads `Qwen/Qwen3-Reranker-0.6B`
+The first Docker startup with QWEN selected downloads the selected Qwen model
 into the Hugging Face cache volume. Startup can take longer than BGE on an empty
 cache; later runs reuse the cached model.
 
@@ -282,7 +284,10 @@ Use with `SparseVector(indices=..., values=...)` when upserting to QDRANT.
       }
     }
   ],
-  "model_name": "BAAI/bge-m3",
+  "model_name": "Qwen/Qwen3-Embedding-0.6B",
+  "dense_model_name": "Qwen/Qwen3-Embedding-0.6B",
+  "sparse_model_name": "BAAI/bge-m3",
+  "colbert_model_name": "BAAI/bge-m3",
   "processing_time_ms": 104.5
 }
 ```
@@ -365,7 +370,7 @@ curl -X POST "http://localhost:8000/rerank" \
 curl "http://localhost:8000/health"
 ```
 
-Returns server status, GPU info, active model, batch size.
+Returns server status, GPU info, active embedding/reranker models, batch size.
 
 ---
 
@@ -412,6 +417,7 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 | `MAX_RERANK_PASSAGES` | `128` | Max passages per rerank request |
 | `MAX_RERANK_TEXT_CHARS` | `20000` | Max chars per rerank query/passage |
 | `MAX_RERANK_TOTAL_CHARS` | `250000` | Max total chars per rerank request |
+| `DENSE_EMBEDDING_MODEL` | `BAAI/bge-m3` | Dense embedding backend selected by launcher (`BAAI/bge-m3` or `Qwen/Qwen3-Embedding-0.6B`) |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker selected by launcher (`BAAI/bge-reranker-v2-m3` or `Qwen/Qwen3-Reranker-0.6B`) |
 | `QWEN_RERANK_MAX_LENGTH` | `8192` | Max Qwen reranker token length when QWEN is selected |
 | `API_TOKEN` | empty | Optional bearer token for non-public endpoints; empty disables authentication |
@@ -428,6 +434,10 @@ Authorization: Bearer <token>
 ```
 
 Service endpoints (`/health`, `/stats`, `/metrics`, `/docs`, `/redoc`, `/openapi.json`) remain accessible without token.
+
+When `DENSE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B`, only dense vectors change. Sparse lexical weights and ColBERT vectors still come from `BAAI/bge-m3`, so mixed requests are supported through the same `/embeddings/` endpoint.
+
+The Qwen dense path intentionally does not add query/document instruction prefixes. This keeps the existing `/embeddings/` API transparent, but deployments optimizing retrieval quality should benchmark task-specific Qwen formatting separately before changing request semantics.
 
 Defaults tuned for **NVIDIA RTX 4060 Laptop 8GB**: observed throughput
 ~29-45 req/s at `conc=8` depending on scenario (see benchmark table above).
@@ -611,6 +621,7 @@ start_period: 300s
 ## References
 
 - [BAAI/bge-m3 - Hugging Face](https://huggingface.co/BAAI/bge-m3)
+- [Qwen/Qwen3-Embedding-0.6B - Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
 - [BAAI/bge-reranker-v2-m3 - Hugging Face](https://huggingface.co/BAAI/bge-reranker-v2-m3)
 - [Qwen/Qwen3-Reranker-0.6B - Hugging Face](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B)
 - [FlagEmbedding - GitHub](https://github.com/FlagOpen/FlagEmbedding)
@@ -622,4 +633,4 @@ start_period: 300s
 ## License
 
 Follows the selected model licenses (`BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`,
-and optionally `Qwen/Qwen3-Reranker-0.6B`).
+and optionally `Qwen/Qwen3-Embedding-0.6B` and `Qwen/Qwen3-Reranker-0.6B`).
