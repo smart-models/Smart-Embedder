@@ -91,6 +91,101 @@ ask_reranker() {
     esac
 }
 
+get_gpu_memory_mib() {
+    if ! command -v nvidia-smi &> /dev/null; then
+        return 1
+    fi
+
+    nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+        | head -n 1 \
+        | tr -d '[:space:]'
+}
+
+load_env_defaults_for_autotune() {
+    if [[ ! -f ".env" ]]; then
+        return
+    fi
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            QWEN_RERANK_MAX_LENGTH|QWEN_RERANK_BATCH_SIZE)
+                if [[ -z "${!key:-}" ]]; then
+                    value="${value%%#*}"
+                    value="${value%\"}"
+                    value="${value#\"}"
+                    value="$(echo "$value" | xargs)"
+                    if [[ -n "$value" ]]; then
+                        export "$key=$value"
+                    fi
+                fi
+                ;;
+        esac
+    done < <(grep -E '^[[:space:]]*(QWEN_RERANK_MAX_LENGTH|QWEN_RERANK_BATCH_SIZE)=' .env || true)
+}
+
+autotune_qwen_reranker_for_gpu() {
+    if [[ "$DEVICE" != "gpu" || "$RERANKER_MODEL" != "Qwen/Qwen3-Reranker-0.6B" ]]; then
+        return
+    fi
+
+    load_env_defaults_for_autotune
+
+    local gpu_mem_mib
+    gpu_mem_mib="$(get_gpu_memory_mib || true)"
+    if [[ -z "$gpu_mem_mib" || ! "$gpu_mem_mib" =~ ^[0-9]+$ ]]; then
+        echo "[WARNING] Could not detect GPU VRAM; keeping Qwen rerank defaults." >&2
+        return
+    fi
+
+    local tuned_batch_size tuned_max_length
+    if (( gpu_mem_mib <= 6144 )); then
+        tuned_batch_size=4
+        tuned_max_length=4096
+    elif (( gpu_mem_mib <= 8192 )); then
+        tuned_batch_size=8
+        tuned_max_length=8192
+    else
+        tuned_batch_size=16
+        tuned_max_length=8192
+    fi
+
+    if [[ -z "${QWEN_RERANK_BATCH_SIZE:-}" ]]; then
+        export QWEN_RERANK_BATCH_SIZE="$tuned_batch_size"
+        echo "[INFO] Auto-tuned QWEN_RERANK_BATCH_SIZE=$QWEN_RERANK_BATCH_SIZE for ${gpu_mem_mib}MiB VRAM"
+    else
+        echo "[INFO] Keeping QWEN_RERANK_BATCH_SIZE=$QWEN_RERANK_BATCH_SIZE (user/env override)"
+    fi
+
+    if [[ -z "${QWEN_RERANK_MAX_LENGTH:-}" ]]; then
+        export QWEN_RERANK_MAX_LENGTH="$tuned_max_length"
+        echo "[INFO] Auto-tuned QWEN_RERANK_MAX_LENGTH=$QWEN_RERANK_MAX_LENGTH for ${gpu_mem_mib}MiB VRAM"
+    else
+        echo "[INFO] Keeping QWEN_RERANK_MAX_LENGTH=$QWEN_RERANK_MAX_LENGTH (user/env override)"
+    fi
+}
+
+autotune_qwen_reranker_for_cpu() {
+    if [[ "$DEVICE" != "cpu" || "$RERANKER_MODEL" != "Qwen/Qwen3-Reranker-0.6B" ]]; then
+        return
+    fi
+
+    load_env_defaults_for_autotune
+
+    if [[ -z "${QWEN_RERANK_BATCH_SIZE:-}" ]]; then
+        export QWEN_RERANK_BATCH_SIZE=1
+        echo "[INFO] Auto-tuned QWEN_RERANK_BATCH_SIZE=$QWEN_RERANK_BATCH_SIZE for CPU mode"
+    else
+        echo "[INFO] Keeping QWEN_RERANK_BATCH_SIZE=$QWEN_RERANK_BATCH_SIZE (user/env override)"
+    fi
+
+    if [[ -z "${QWEN_RERANK_MAX_LENGTH:-}" ]]; then
+        export QWEN_RERANK_MAX_LENGTH=2048
+        echo "[INFO] Auto-tuned QWEN_RERANK_MAX_LENGTH=$QWEN_RERANK_MAX_LENGTH for CPU mode"
+    else
+        echo "[INFO] Keeping QWEN_RERANK_MAX_LENGTH=$QWEN_RERANK_MAX_LENGTH (user/env override)"
+    fi
+}
+
 # Validate mode and device
 if [[ "$MODE" != "local" && "$MODE" != "docker" ]]; then
     echo "[ERROR] Invalid mode: $MODE"
@@ -127,12 +222,19 @@ if [[ "$DEVICE" == "auto" ]]; then
     fi
 fi
 
+autotune_qwen_reranker_for_gpu
+autotune_qwen_reranker_for_cpu
+
 echo "========================================"
 echo "  BGE-M3 Embedding Server"
 echo "  Mode:   $MODE"
 echo "  Device: $DEVICE"
 echo "  Dense:  $DENSE_EMBEDDING_MODEL"
 echo "  Reranker: $RERANKER_MODEL"
+if [[ "$RERANKER_MODEL" == "Qwen/Qwen3-Reranker-0.6B" ]]; then
+    echo "  Qwen rerank batch: ${QWEN_RERANK_BATCH_SIZE:-16}"
+    echo "  Qwen rerank max length: ${QWEN_RERANK_MAX_LENGTH:-8192}"
+fi
 echo "========================================"
 echo ""
 

@@ -10,7 +10,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
 import numpy as np
@@ -101,7 +101,7 @@ def _env_int_range(
 
 
 MAX_INPUT_LENGTH = _env_int_range("MAX_INPUT_LENGTH", 2048, min_value=1, max_value=8192)
-REQUEST_TIMEOUT = _env_int_range("REQUEST_TIMEOUT", 30, min_value=1, max_value=3600)
+REQUEST_TIMEOUT = _env_int_range("REQUEST_TIMEOUT", 90, min_value=1, max_value=3600)
 # Defaults tuned on RTX 4060 8GB: peak ~30-44 req/s @ conc=8 across scenarios
 MAX_QUEUE_SIZE = _env_int_range("MAX_QUEUE_SIZE", 200, min_value=1, max_value=10000)
 RATE_LIMIT_REQUESTS_PER_MINUTE = _env_int_range(
@@ -134,10 +134,13 @@ RERANK_MAX_QUEUE = _env_int_range("RERANK_MAX_QUEUE", 32, min_value=1, max_value
 # Hard GPU timeout for a single rerank inference. Kept strictly below
 # REQUEST_TIMEOUT so the executor surfaces a 504 before the HTTP layer would.
 RERANK_GPU_TIMEOUT = _env_int_range(
-    "RERANK_GPU_TIMEOUT", 15, min_value=1, max_value=3600
+    "RERANK_GPU_TIMEOUT", 60, min_value=1, max_value=3600
 )
 QWEN_RERANK_MAX_LENGTH = _env_int_range(
     "QWEN_RERANK_MAX_LENGTH", 8192, min_value=128, max_value=32768
+)
+QWEN_RERANK_BATCH_SIZE = _env_int_range(
+    "QWEN_RERANK_BATCH_SIZE", 16, min_value=1, max_value=512
 )
 
 
@@ -411,7 +414,7 @@ class QwenDenseEmbeddingBackend:
             for name, value in encoded.items()
         }
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(**encoded)
             # With left padding, -1 is the real final token for every row.
             dense_vecs = outputs.last_hidden_state[:, -1, :]
@@ -537,7 +540,28 @@ active_requests = Gauge(
 )
 
 gpu_memory_allocated = Gauge(
-    "embedding_gpu_memory_allocated_bytes", "GPU memory allocated in bytes"
+    "embedding_gpu_memory_allocated_bytes",
+    "Legacy embedding label for process GPU tensor memory allocated in bytes",
+)
+gpu_memory_reserved = Gauge(
+    "embedding_gpu_memory_reserved_bytes",
+    "Legacy embedding label for process GPU memory reserved by the PyTorch caching allocator",
+)
+process_gpu_memory_allocated = Gauge(
+    "gpu_memory_allocated_bytes",
+    "Process GPU tensor memory allocated in bytes",
+)
+process_gpu_memory_reserved = Gauge(
+    "gpu_memory_reserved_bytes",
+    "Process GPU memory reserved by the PyTorch caching allocator in bytes",
+)
+process_gpu_memory_free = Gauge(
+    "gpu_memory_free_bytes",
+    "CUDA device free memory in bytes",
+)
+process_gpu_memory_total = Gauge(
+    "gpu_memory_total_bytes",
+    "CUDA device total memory in bytes",
 )
 
 # Info
@@ -577,6 +601,25 @@ rerank_requests_rejected = Counter(
     "Total rejected rerank requests",
     ["reason"],
 )
+
+
+def record_gpu_memory_metrics() -> None:
+    """Record process-level CUDA memory metrics when CUDA is available."""
+    if not has_cuda:
+        return
+
+    allocated = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    free, total = torch.cuda.mem_get_info()
+
+    # Keep legacy embedding-prefixed gauges for existing dashboards.
+    gpu_memory_allocated.set(allocated)
+    gpu_memory_reserved.set(reserved)
+
+    process_gpu_memory_allocated.set(allocated)
+    process_gpu_memory_reserved.set(reserved)
+    process_gpu_memory_free.set(free)
+    process_gpu_memory_total.set(total)
 
 
 # --- 3. Pydantic Data Models for API (Structured Response) ---
@@ -776,10 +819,23 @@ class RerankerWrapper:
         # tokenizer.pad() does not raise. Required for batched scoring.
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        model_kwargs = {"dtype": torch.float16} if has_cuda else {}
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name, **model_kwargs
-        ).to(device).eval()
+        model_kwargs: Dict[str, Any] = {"torch_dtype": torch.float16} if has_cuda else {}
+        if has_cuda:
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name, attn_implementation="sdpa", **model_kwargs
+                ).to(device).eval()
+                logging.info("Qwen reranker: SDPA attention enabled.")
+            except (ValueError, ImportError):
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name, **model_kwargs
+                ).to(device).eval()
+                logging.info("Qwen reranker: SDPA unavailable, using default attention.")
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name, **model_kwargs
+            ).to(device).eval()
+        self.model.config.use_cache = False
         self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
         self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
         self.prefix_tokens = self.tokenizer.encode(
@@ -817,15 +873,27 @@ class RerankerWrapper:
         formatted_pairs = [
             self._format_qwen_instruction(query, passage) for query, passage in pairs
         ]
-        inputs = self._tokenize_qwen_pairs(formatted_pairs)
+        if not formatted_pairs:
+            return []
 
-        with torch.no_grad():
-            batch_scores = self.model(**inputs).logits[:, -1, :]
-            true_vector = batch_scores[:, self.token_true_id]
-            false_vector = batch_scores[:, self.token_false_id]
-            binary_scores = torch.stack([false_vector, true_vector], dim=1)
-            probabilities = torch.nn.functional.log_softmax(binary_scores, dim=1)
-            return probabilities[:, 1].exp().detach().cpu().tolist()
+        # Sort by text length to minimise padding waste; restore original order after.
+        order = sorted(range(len(formatted_pairs)), key=lambda i: len(formatted_pairs[i]))
+        sorted_pairs = [formatted_pairs[i] for i in order]
+
+        all_scores: List[float] = [0.0] * len(pairs)
+        for batch_start in range(0, len(sorted_pairs), QWEN_RERANK_BATCH_SIZE):
+            batch = sorted_pairs[batch_start : batch_start + QWEN_RERANK_BATCH_SIZE]
+            inputs = self._tokenize_qwen_pairs(batch)
+            with torch.inference_mode():
+                logits = self.model(**inputs, use_cache=False).logits[:, -1, :]
+                true_vec = logits[:, self.token_true_id]
+                false_vec = logits[:, self.token_false_id]
+                binary = torch.stack([false_vec, true_vec], dim=1)
+                probs = torch.nn.functional.log_softmax(binary, dim=1)
+                for local_i, score in enumerate(probs[:, 1].exp().detach().cpu().tolist()):
+                    all_scores[order[batch_start + local_i]] = score
+
+        return all_scores
 
     def _format_qwen_instruction(self, query: str, passage: str) -> str:
         return (
@@ -1034,10 +1102,6 @@ class RequestProcessor:
                 gpu_duration = time.time() - gpu_start
                 gpu_inference_duration.observe(gpu_duration)
 
-                # PROMETHEUS: Track GPU memory if CUDA
-                if has_cuda:
-                    gpu_memory_allocated.set(torch.cuda.memory_allocated())
-
             offset = 0
             for req_id, req_data in requests:
                 num_sentences = len(req_data.sentences)
@@ -1085,6 +1149,9 @@ class RequestProcessor:
                     self._set_response_exception(req_id, e)
                 finally:
                     offset += num_sentences
+
+            # PROMETHEUS: Record GPU memory after per-request results are prepared.
+            record_gpu_memory_metrics()
 
         except Exception as e:
             logging.error(f"Error during batch processing: {e}", exc_info=True)
@@ -1660,6 +1727,7 @@ async def rerank(request: RerankRequest):
                     detail="Timeout during rerank GPU processing.",
                 )
             rerank_inference_duration.observe(time.time() - inference_start)
+            record_gpu_memory_metrics()
 
             # Build response sorted by score descending
             ranked = sorted(

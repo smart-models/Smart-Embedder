@@ -11,7 +11,7 @@ High-performance FastAPI server for BGE-M3 embeddings and selectable reranking:
 | **Backpressure** | Embedding queue max 200, rerank slots max 32, HTTP 503 on overflow |
 | **Graceful Shutdown** | 30s drain for in-flight requests |
 | **Prometheus Metrics** | Counters, histograms, gauges for both models |
-| **Dynamic Batching** | Auto-tuned to GPU VRAM at startup |
+| **Dynamic Batching** | Embedding batch size adapts to GPU VRAM and max input length at startup |
 
 ## Quick Start
 
@@ -50,6 +50,10 @@ Startup asks two independent model questions:
 
 1. Dense embedding backend: choose BGE for current all-BGE embeddings, or QWEN to return Qwen dense vectors while keeping BGE sparse and ColBERT vectors.
 2. Reranker backend: choose BGE or QWEN for `/rerank`.
+
+The interactive model selection is provided by the launcher scripts. Direct
+`uvicorn` or `docker compose` startup does not prompt; it uses environment
+variables or `.env`, falling back to BGE defaults.
 
 **`local` mode**: requires `.venv` already created (see step 1). The script activates venv, checks for `uvicorn`, installs dependencies if missing, then starts the server.
 
@@ -425,7 +429,7 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 | Env var | Default | Description |
 |---|---|---|
 | `MAX_INPUT_LENGTH` | `2048` | Max tokens per sequence |
-| `REQUEST_TIMEOUT` | `30` | Global HTTP timeout (sec) |
+| `REQUEST_TIMEOUT` | `90` | Global HTTP timeout (sec); keep above `RERANK_GPU_TIMEOUT` |
 | `MAX_SENTENCES_PER_REQUEST` | `128` | Max sentences per embedding request |
 | `MAX_SENTENCE_CHARS` | `20000` | Max chars per single embedding sentence |
 | `MAX_TOTAL_CHARS_PER_REQUEST` | `250000` | Max total chars per embedding request |
@@ -434,11 +438,12 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 | `MAX_RERANK_TOTAL_CHARS` | `250000` | Max total chars per rerank request |
 | `DENSE_EMBEDDING_MODEL` | `BAAI/bge-m3` | Dense embedding backend selected by launcher (`BAAI/bge-m3` or `Qwen/Qwen3-Embedding-0.6B`) |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker selected by launcher (`BAAI/bge-reranker-v2-m3` or `Qwen/Qwen3-Reranker-0.6B`) |
-| `QWEN_RERANK_MAX_LENGTH` | `8192` | Max Qwen reranker token length when QWEN is selected |
+| `QWEN_RERANK_MAX_LENGTH` | launcher-tuned / `8192` fallback | Max Qwen reranker token length when QWEN is selected |
+| `QWEN_RERANK_BATCH_SIZE` | launcher-tuned / `16` fallback | Max query-passage pairs per Qwen reranker micro-batch |
 | `API_TOKEN` | empty | Optional bearer token for non-public endpoints; empty disables authentication |
 | `MAX_QUEUE_SIZE` | `200` | Max requests in queue `/embeddings/` (backpressure) |
 | `RERANK_MAX_QUEUE` | `32` | Max concurrent slots for `/rerank` (backpressure) |
-| `RERANK_GPU_TIMEOUT` | `15` | Hard timeout for a single rerank inference (sec) |
+| `RERANK_GPU_TIMEOUT` | `60` | Hard timeout for a single rerank inference (sec); keep below `REQUEST_TIMEOUT` |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | `3600` | Rate limit per IP (60 req/s) |
 | `RATE_LIMIT_BURST_SIZE` | `120` | Token bucket burst (~2s of traffic) |
 
@@ -454,8 +459,26 @@ When `DENSE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B`, only dense vectors chang
 
 The Qwen dense path intentionally does not add query/document instruction prefixes. This keeps the existing `/embeddings/` API transparent, but deployments optimizing retrieval quality should benchmark task-specific Qwen formatting separately before changing request semantics.
 
-Defaults tuned for **NVIDIA RTX 4060 Laptop 8GB**: observed throughput
-~29-45 req/s at `conc=8` depending on scenario (see benchmark table above).
+When QWEN reranking is selected and GPU mode is used, the launch scripts auto-tune
+Qwen rerank limits from detected GPU VRAM unless `QWEN_RERANK_BATCH_SIZE` or
+`QWEN_RERANK_MAX_LENGTH` are already set in the environment or `.env`:
+
+| GPU VRAM | QWEN_RERANK_BATCH_SIZE | QWEN_RERANK_MAX_LENGTH |
+|---|---:|---:|
+| <= 6 GB | 4 | 4096 |
+| <= 8 GB | 8 | 8192 |
+| > 8 GB | 16 | 8192 |
+
+When QWEN reranking is selected in CPU mode, the launch scripts use conservative
+defaults unless overridden:
+
+| Device | QWEN_RERANK_BATCH_SIZE | QWEN_RERANK_MAX_LENGTH |
+|---|---:|---:|
+| CPU | 1 | 2048 |
+
+Benchmark defaults are tuned for **NVIDIA RTX 4060 Laptop 8GB**: observed
+throughput ~29-45 req/s at `conc=8` depending on scenario (see benchmark
+table above).
 Override:
 
 ```bash
@@ -472,15 +495,25 @@ Compose automatically loads `.env` in the same directory. `.env` is in `.gitigno
 `MULTI_GPU_DEVICES = None` (in `bge-m3_server.py`) can be changed to
 `['cuda:0', 'cuda:1']` for multi-GPU.
 
-**Batch size** is automatically calculated from available VRAM:
+**Embedding batch size** is automatically calculated from available VRAM and
+`MAX_INPUT_LENGTH`. With the default `MAX_INPUT_LENGTH=2048`, the server uses
+the conservative long-sequence profile:
+
+| Condition | batch_size | MAX_REQUESTS_IN_BATCH |
+|---|---:|---:|
+| GPU > 8 GB | 12 | 16 |
+| GPU <= 8 GB and > 4 GB | 6 | 16 |
+| GPU <= 4 GB | 3 | 16 |
+| CPU | 1 | 8 |
+
+If `MAX_INPUT_LENGTH<=512`, the server switches to the short-sequence profile:
 
 | VRAM | batch_size | MAX_REQUESTS_IN_BATCH |
-|---|---|---|
+|---|---:|---:|
 | > 8 GB | 128 | 64 |
 | > 6 GB | 64 | 32 |
 | > 4 GB | 32 | 16 |
 | <= 4 GB | 16 | 16 |
-| CPU | 1 | 8 |
 
 ---
 
@@ -498,8 +531,21 @@ Compose automatically loads `.env` in the same directory. `.env` is in `.gitigno
 | `embedding_gpu_inference_duration_seconds` | Histogram | - |
 | `embedding_queue_size` | Gauge | - |
 | `embedding_active_requests` | Gauge | - |
-| `embedding_gpu_memory_allocated_bytes` | Gauge | - |
+| `embedding_gpu_memory_allocated_bytes` | Gauge | Legacy process GPU allocated memory, kept for existing dashboards |
+| `embedding_gpu_memory_reserved_bytes` | Gauge | Legacy process GPU reserved memory, kept for existing dashboards |
 | `embedding_server_info` | Info | `model`, `dense_embedding_model`, `version`, `gpu_available`, `device` |
+
+### GPU Process
+
+These gauges are process-level CUDA readings updated after embedding and rerank
+inference. They include all loaded models and both endpoint paths.
+
+| Metric | Type | Label |
+|---|---|---|
+| `gpu_memory_allocated_bytes` | Gauge | Process GPU tensor memory allocated by PyTorch |
+| `gpu_memory_reserved_bytes` | Gauge | Process GPU memory reserved by the PyTorch caching allocator |
+| `gpu_memory_free_bytes` | Gauge | CUDA device free memory from `torch.cuda.mem_get_info()` |
+| `gpu_memory_total_bytes` | Gauge | CUDA device total memory from `torch.cuda.mem_get_info()` |
 
 ### Reranker
 
@@ -524,8 +570,14 @@ histogram_quantile(0.95, rate(embedding_request_duration_seconds_bucket[5m]))
 # Error rate (%)
 rate(embedding_requests_total{status="error"}[5m]) / rate(embedding_requests_total[5m]) * 100
 
-# GPU memory (GB)
-embedding_gpu_memory_allocated_bytes / 1024 / 1024 / 1024
+# GPU tensor memory allocated by PyTorch (GB)
+gpu_memory_allocated_bytes / 1024 / 1024 / 1024
+
+# GPU memory reserved by PyTorch caching allocator (GB)
+gpu_memory_reserved_bytes / 1024 / 1024 / 1024
+
+# CUDA device memory visible to the process (GB)
+gpu_memory_free_bytes / 1024 / 1024 / 1024
 
 # Reranker throughput (pairs/sec)
 rate(rerank_pairs_processed_total[1m])
@@ -550,7 +602,7 @@ scrape_configs:
 1. **Embedding Request Rate** - `rate(embedding_requests_total[1m])`
 2. **Latency P50/P95/P99** - `histogram_quantile(0.X, ...)`
 3. **Queue Size** - `embedding_queue_size`
-4. **GPU Memory** - `embedding_gpu_memory_allocated_bytes`
+4. **GPU Memory** - `gpu_memory_allocated_bytes`, `gpu_memory_reserved_bytes`, `gpu_memory_free_bytes`
 5. **Rerank Request Rate** - `rate(rerank_requests_total[1m])`
 6. **Batch Size Distribution** - `embedding_batch_size`
 
@@ -571,9 +623,9 @@ scrape_configs:
 - Rate limit uses direct connection IP (`request.client.host`). If the server is behind a trusted reverse proxy, update the middleware to extract IP from `X-Forwarded-For`.
 
 ### Timeout
-- `REQUEST_TIMEOUT=30s` is the global HTTP timeout (504 to the caller).
+- `REQUEST_TIMEOUT=90s` is the global HTTP timeout (504 to the caller).
 - `GPU_PROCESS_TIMEOUT=15s` (CUDA) / `30s` (CPU) limits embedding batch inference on the thread pool.
-- `RERANK_GPU_TIMEOUT=15s` limits rerank inference and should stay below `REQUEST_TIMEOUT`.
+- `RERANK_GPU_TIMEOUT=60s` limits rerank inference and should stay below `REQUEST_TIMEOUT`.
 - Timeouts are tracked in Prometheus as `embedding_requests_total{status="timeout"}` or `rerank_requests_total{status="timeout"}`.
 
 ### Graceful Shutdown

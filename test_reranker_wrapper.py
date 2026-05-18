@@ -62,6 +62,9 @@ class FakeAutoTokenizer:
 
 
 class FakeCausalLM:
+    def __init__(self):
+        self.config = types.SimpleNamespace(use_cache=True)
+
     def to(self, device):
         return self
 
@@ -150,9 +153,16 @@ class FakeTorchModule(types.ModuleType):
 
     def __init__(self):
         super().__init__("torch")
+        self.cuda_available = False
+        self.memory_allocated_value = 123
+        self.memory_reserved_value = 456
+        self.mem_get_info_value = (789, 1000)
         self.cuda = types.SimpleNamespace(
-            is_available=lambda: False,
+            is_available=lambda: self.cuda_available,
             device_count=lambda: 0,
+            memory_allocated=lambda: self.memory_allocated_value,
+            memory_reserved=lambda: self.memory_reserved_value,
+            mem_get_info=lambda: self.mem_get_info_value,
         )
         self.nn = types.SimpleNamespace(
             functional=types.SimpleNamespace(
@@ -169,6 +179,9 @@ class FakeTorchModule(types.ModuleType):
             return False
 
     def no_grad(self):
+        return self._NoGrad()
+
+    def inference_mode(self):
         return self._NoGrad()
 
     def stack(self, values, dim=1):
@@ -237,8 +250,12 @@ class FakeBaseModel:
 
 
 class FakeMetric:
+    instances = []
+
     def __init__(self):
         self.last_info = None
+        self.last_set = None
+        FakeMetric.instances.append(self)
 
     def labels(self, *args, **kwargs):
         return self
@@ -250,6 +267,7 @@ class FakeMetric:
         return None
 
     def set(self, *args, **kwargs):
+        self.last_set = args[0] if args else None
         return None
 
     def observe(self, *args, **kwargs):
@@ -328,6 +346,7 @@ def install_support_fakes():
 def load_server(env=None):
     module_name = "bge_m3_server_under_test"
     sys.modules.pop(module_name, None)
+    FakeMetric.instances = []
 
     fake_flag_embedding = types.ModuleType("FlagEmbedding")
     fake_flag_embedding.BGEM3FlagModel = FakeBGEM3FlagModel
@@ -532,6 +551,7 @@ class RerankerWrapperTests(unittest.TestCase):
         wrapper = module.RerankerWrapper(module.QWEN_RERANKER_MODEL)
         scores = wrapper.score([["query", "passage"]], normalize=False)
         self.assertEqual(scores, [0.75])
+        self.assertFalse(wrapper.model.config.use_cache)
         self.assertEqual(wrapper.tokenizer.pad_token, wrapper.tokenizer.eos_token)
         self.assertIn("<Query>: query", wrapper.tokenizer.encoded[0])
         self.assertIn("<Document>: passage", wrapper.tokenizer.encoded[0])
@@ -566,6 +586,22 @@ class RerankerWrapperTests(unittest.TestCase):
             module.server_info.last_info["dense_embedding_model"],
             module.QWEN_DENSE_EMBEDDING_MODEL,
         )
+
+    def test_gpu_memory_snapshot_updates_global_and_legacy_metrics(self):
+        module = load_server()
+        module.has_cuda = True
+        module.torch.cuda.memory_allocated_value = 123
+        module.torch.cuda.memory_reserved_value = 456
+        module.torch.cuda.mem_get_info_value = (789, 1000)
+
+        module.record_gpu_memory_metrics()
+
+        self.assertEqual(module.gpu_memory_allocated.last_set, 123)
+        self.assertEqual(module.gpu_memory_reserved.last_set, 456)
+        self.assertEqual(module.process_gpu_memory_allocated.last_set, 123)
+        self.assertEqual(module.process_gpu_memory_reserved.last_set, 456)
+        self.assertEqual(module.process_gpu_memory_free.last_set, 789)
+        self.assertEqual(module.process_gpu_memory_total.last_set, 1000)
 
     def test_embeddings_response_model_declares_backend_metadata(self):
         module = load_server()

@@ -100,12 +100,19 @@ goto :device_selected
 
 :device_selected
 
+if "%DEVICE%"=="gpu" if "%RERANKER_MODEL%"=="Qwen/Qwen3-Reranker-0.6B" call :autotune_qwen_reranker_gpu
+if "%DEVICE%"=="cpu" if "%RERANKER_MODEL%"=="Qwen/Qwen3-Reranker-0.6B" call :autotune_qwen_reranker_cpu
+
 echo ========================================
 echo  BGE-M3 Embedding Server
 echo  Mode:   %MODE%
 echo  Device: %DEVICE%
 echo  Dense:  %DENSE_EMBEDDING_MODEL%
 echo  Reranker: %RERANKER_MODEL%
+if "%RERANKER_MODEL%"=="Qwen/Qwen3-Reranker-0.6B" (
+    echo  Qwen rerank batch: %QWEN_RERANK_BATCH_SIZE%
+    echo  Qwen rerank max length: %QWEN_RERANK_MAX_LENGTH%
+)
 echo ========================================
 echo.
 
@@ -238,6 +245,74 @@ echo   start_server.bat docker gpu
 echo   start_server.bat docker cpu
 set "EXIT_CODE=1"
 goto :exit
+
+:autotune_qwen_reranker_gpu
+call :load_env_defaults_for_autotune
+
+set "GPU_MEM_MIB="
+for /f "usebackq tokens=* delims=" %%M in (`nvidia-smi --query-gpu^=memory.total --format^=csv,noheader,nounits 2^>nul`) do (
+    if not defined GPU_MEM_MIB set "GPU_MEM_MIB=%%M"
+)
+set "GPU_MEM_MIB=!GPU_MEM_MIB: =!"
+
+if "!GPU_MEM_MIB!"=="" (
+    echo [WARNING] Could not detect GPU VRAM; keeping Qwen rerank defaults.
+    if "!QWEN_RERANK_BATCH_SIZE!"=="" set "QWEN_RERANK_BATCH_SIZE=16"
+    if "!QWEN_RERANK_MAX_LENGTH!"=="" set "QWEN_RERANK_MAX_LENGTH=8192"
+    goto :eof
+)
+
+set "TUNED_QWEN_RERANK_BATCH_SIZE=16"
+set "TUNED_QWEN_RERANK_MAX_LENGTH=8192"
+if !GPU_MEM_MIB! LEQ 6144 (
+    set "TUNED_QWEN_RERANK_BATCH_SIZE=4"
+    set "TUNED_QWEN_RERANK_MAX_LENGTH=4096"
+) else if !GPU_MEM_MIB! LEQ 8192 (
+    set "TUNED_QWEN_RERANK_BATCH_SIZE=8"
+    set "TUNED_QWEN_RERANK_MAX_LENGTH=8192"
+)
+
+if "!QWEN_RERANK_BATCH_SIZE!"=="" (
+    set "QWEN_RERANK_BATCH_SIZE=!TUNED_QWEN_RERANK_BATCH_SIZE!"
+    echo [INFO] Auto-tuned QWEN_RERANK_BATCH_SIZE=!QWEN_RERANK_BATCH_SIZE! for !GPU_MEM_MIB!MiB VRAM
+) else (
+    echo [INFO] Keeping QWEN_RERANK_BATCH_SIZE=!QWEN_RERANK_BATCH_SIZE! ^(user/env override^)
+)
+
+if "!QWEN_RERANK_MAX_LENGTH!"=="" (
+    set "QWEN_RERANK_MAX_LENGTH=!TUNED_QWEN_RERANK_MAX_LENGTH!"
+    echo [INFO] Auto-tuned QWEN_RERANK_MAX_LENGTH=!QWEN_RERANK_MAX_LENGTH! for !GPU_MEM_MIB!MiB VRAM
+) else (
+    echo [INFO] Keeping QWEN_RERANK_MAX_LENGTH=!QWEN_RERANK_MAX_LENGTH! ^(user/env override^)
+)
+goto :eof
+
+:autotune_qwen_reranker_cpu
+call :load_env_defaults_for_autotune
+
+if "!QWEN_RERANK_BATCH_SIZE!"=="" (
+    set "QWEN_RERANK_BATCH_SIZE=1"
+    echo [INFO] Auto-tuned QWEN_RERANK_BATCH_SIZE=!QWEN_RERANK_BATCH_SIZE! for CPU mode
+) else (
+    echo [INFO] Keeping QWEN_RERANK_BATCH_SIZE=!QWEN_RERANK_BATCH_SIZE! ^(user/env override^)
+)
+
+if "!QWEN_RERANK_MAX_LENGTH!"=="" (
+    set "QWEN_RERANK_MAX_LENGTH=2048"
+    echo [INFO] Auto-tuned QWEN_RERANK_MAX_LENGTH=!QWEN_RERANK_MAX_LENGTH! for CPU mode
+) else (
+    echo [INFO] Keeping QWEN_RERANK_MAX_LENGTH=!QWEN_RERANK_MAX_LENGTH! ^(user/env override^)
+)
+goto :eof
+
+:load_env_defaults_for_autotune
+if not exist ".env" goto :eof
+
+for /f "usebackq tokens=1,* delims==" %%K in (".env") do (
+    if /I "%%K"=="QWEN_RERANK_BATCH_SIZE" if "!QWEN_RERANK_BATCH_SIZE!"=="" set "QWEN_RERANK_BATCH_SIZE=%%L"
+    if /I "%%K"=="QWEN_RERANK_MAX_LENGTH" if "!QWEN_RERANK_MAX_LENGTH!"=="" set "QWEN_RERANK_MAX_LENGTH=%%L"
+)
+goto :eof
 
 :exit
 popd >nul
