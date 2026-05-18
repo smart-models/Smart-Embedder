@@ -337,6 +337,7 @@ Ranks a list of passages by relevance to a query.
 - `normalize: true` returns a score in `[0, 1]` (sigmoid)
 - `normalize: false` returns a raw score (negative values possible)
 - With QWEN selected, scores are yes-probabilities and `normalize` is kept as an API-compatible no-op
+- Do not compare BGE `normalize: false` raw logits directly with QWEN scores
 - Passages are returned sorted by **descending** score
 - The `index` field returns the original position in the input list
 - `model_name` reports the reranker selected at startup
@@ -598,8 +599,9 @@ Error: manifest for nvidia/cuda:12.6.3-runtime-ubuntu22.04 not found
 Search correct tag on [hub.docker.com/r/nvidia/cuda/tags](https://hub.docker.com/r/nvidia/cuda/tags) and update first line of `Dockerfile`.
 
 ### Docker: Container Unhealthy on First Startup
-Model download may exceed the Compose healthcheck start period.
-Increase in `docker-compose.yml`:
+Default Compose and Dockerfile healthchecks allow a 300s startup period for
+first-run model downloads. On slow networks or empty caches, increase the
+healthcheck start period above 300s in your custom Compose override:
 ```yaml
 start_period: 300s
 ```

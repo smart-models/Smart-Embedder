@@ -48,6 +48,10 @@ class FakeTokenizer:
         return {"input_ids": [[21, 22] for _ in pairs]}
 
     def pad(self, inputs, **kwargs):
+        if self.pad_token is None:
+            raise ValueError(
+                "Asking to pad but the tokenizer does not have a padding token"
+            )
         return {"input_ids": FakeTensor(inputs["input_ids"])}
 
 
@@ -301,6 +305,7 @@ class RerankerWrapperTests(unittest.TestCase):
         wrapper = module.RerankerWrapper(module.QWEN_RERANKER_MODEL)
         scores = wrapper.score([["query", "passage"]], normalize=False)
         self.assertEqual(scores, [0.75])
+        self.assertEqual(wrapper.tokenizer.pad_token, wrapper.tokenizer.eos_token)
         self.assertIn("<Query>: query", wrapper.tokenizer.encoded[0])
         self.assertIn("<Document>: passage", wrapper.tokenizer.encoded[0])
 
