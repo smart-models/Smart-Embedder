@@ -413,6 +413,7 @@ class QwenDenseEmbeddingBackend:
 
         with torch.no_grad():
             outputs = self.model(**encoded)
+            # With left padding, -1 is the real final token for every row.
             dense_vecs = outputs.last_hidden_state[:, -1, :]
             if dense_vecs.shape[-1] != QWEN_DENSE_VECTOR_SIZE:
                 raise RuntimeError(

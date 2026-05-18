@@ -595,6 +595,43 @@ class RerankerWrapperTests(unittest.TestCase):
         self.assertEqual(response.model_name, module.BGE_EMBEDDING_MODEL)
         self.assertEqual(response.dense_model_name, module.BGE_EMBEDDING_MODEL)
 
+    def test_qwen_dense_backend_returns_1024_dimension_vectors(self):
+        module = load_server(
+            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
+        )
+        backend = module.embedding_service.qwen_dense_backend
+        result = backend.embed_dense(["alpha"], normalize_dense=False)
+        self.assertEqual(len(result["dense_vecs"][0]), 1024)
+
+    def test_qwen_dense_backend_applies_normalization_when_requested(self):
+        module = load_server(
+            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
+        )
+        backend = module.embedding_service.qwen_dense_backend
+        result = backend.embed_dense(["alpha"], normalize_dense=True)
+        self.assertEqual(len(result["dense_vecs"][0]), 1024)
+        self.assertTrue(backend.model.last_dense_tensor.normalized)
+
+    def test_qwen_dense_backend_wrong_dimension_raises_runtime_error(self):
+        module = load_server(
+            {
+                "DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+                "FAKE_QWEN_DENSE_DIM": "768",
+            }
+        )
+        backend = module.embedding_service.qwen_dense_backend
+        with self.assertRaisesRegex(RuntimeError, "expected 1024"):
+            backend.embed_dense(["alpha"], normalize_dense=False)
+
+    def test_qwen_dense_load_failure_fails_server_startup(self):
+        with self.assertRaisesRegex(RuntimeError, "qwen dense load failed"):
+            load_server(
+                {
+                    "DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+                    "FAKE_QWEN_DENSE_LOAD_ERROR": "1",
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
