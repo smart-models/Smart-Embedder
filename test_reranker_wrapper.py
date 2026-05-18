@@ -349,6 +349,68 @@ def load_server(env=None):
         return module
 
 
+class TrackingBgeBackend:
+    def __init__(self):
+        self.calls = []
+
+    def embed(
+        self,
+        sentences,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert=True,
+        normalize_dense=False,
+    ):
+        self.calls.append(
+            {
+                "sentences": sentences,
+                "return_dense": return_dense,
+                "return_sparse": return_sparse,
+                "return_colbert": return_colbert,
+                "normalize_dense": normalize_dense,
+            }
+        )
+        result = {}
+        if return_dense:
+            result["dense_vecs"] = [[3.0, 4.0] for _ in sentences]
+        if return_sparse:
+            result["lexical_weights"] = [{"42": 0.5} for _ in sentences]
+        if return_colbert:
+            result["colbert_vecs"] = [[[0.1, 0.2]] for _ in sentences]
+        return result
+
+
+class TrackingQwenDenseBackend:
+    def __init__(self):
+        self.calls = []
+
+    def embed_dense(self, sentences, normalize_dense=False):
+        self.calls.append(
+            {"sentences": sentences, "normalize_dense": normalize_dense}
+        )
+        return {"dense_vecs": [[9.0] * 1024 for _ in sentences]}
+
+
+class FailingQwenDenseBackend:
+    def embed_dense(self, sentences, normalize_dense=False):
+        raise RuntimeError("qwen dense failed")
+
+
+def build_embedding_service(module, dense_model_name):
+    service = module.EmbeddingService.__new__(module.EmbeddingService)
+    service.bge_backend = TrackingBgeBackend()
+    service.qwen_dense_backend = (
+        TrackingQwenDenseBackend()
+        if dense_model_name == module.QWEN_DENSE_EMBEDDING_MODEL
+        else None
+    )
+    service.bge_model_name = module.BGE_EMBEDDING_MODEL
+    service.dense_model_name = dense_model_name
+    service.sparse_model_name = module.BGE_EMBEDDING_MODEL
+    service.colbert_model_name = module.BGE_EMBEDDING_MODEL
+    return service
+
+
 class RerankerWrapperTests(unittest.TestCase):
     def test_resolve_reranker_model_defaults_to_bge_for_invalid_value(self):
         module = load_server({"RERANKER_MODEL": "invalid"})
@@ -370,6 +432,88 @@ class RerankerWrapperTests(unittest.TestCase):
             self.assertEqual(
                 module._resolve_dense_embedding_model(),
                 module.QWEN_DENSE_EMBEDDING_MODEL,
+            )
+
+    def test_qwen_dense_only_request_calls_only_qwen_backend(self):
+        module = load_server()
+        service = build_embedding_service(module, module.QWEN_DENSE_EMBEDDING_MODEL)
+        result = service.embed(
+            ["alpha"],
+            return_dense=True,
+            return_sparse=False,
+            return_colbert=False,
+            normalize_dense=True,
+        )
+        self.assertEqual(result["dense_vecs"][0], [9.0] * 1024)
+        self.assertEqual(service.bge_backend.calls, [])
+        self.assertEqual(
+            service.qwen_dense_backend.calls,
+            [{"sentences": ["alpha"], "normalize_dense": True}],
+        )
+
+    def test_qwen_sparse_colbert_request_calls_only_bge_backend(self):
+        module = load_server()
+        service = build_embedding_service(module, module.QWEN_DENSE_EMBEDDING_MODEL)
+        result = service.embed(
+            ["alpha"],
+            return_dense=False,
+            return_sparse=True,
+            return_colbert=True,
+            normalize_dense=False,
+        )
+        self.assertNotIn("dense_vecs", result)
+        self.assertEqual(result["lexical_weights"], [{"42": 0.5}])
+        self.assertEqual(result["colbert_vecs"], [[[0.1, 0.2]]])
+        self.assertEqual(service.qwen_dense_backend.calls, [])
+        self.assertEqual(len(service.bge_backend.calls), 1)
+        self.assertFalse(service.bge_backend.calls[0]["return_dense"])
+
+    def test_qwen_hybrid_request_merges_dense_with_bge_sparse_and_colbert(self):
+        module = load_server()
+        service = build_embedding_service(module, module.QWEN_DENSE_EMBEDDING_MODEL)
+        result = service.embed(
+            ["alpha"],
+            return_dense=True,
+            return_sparse=True,
+            return_colbert=True,
+            normalize_dense=False,
+        )
+        self.assertEqual(result["dense_vecs"][0], [9.0] * 1024)
+        self.assertEqual(result["lexical_weights"], [{"42": 0.5}])
+        self.assertEqual(result["colbert_vecs"], [[[0.1, 0.2]]])
+        self.assertEqual(len(service.qwen_dense_backend.calls), 1)
+        self.assertEqual(len(service.bge_backend.calls), 1)
+        self.assertFalse(service.bge_backend.calls[0]["return_dense"])
+
+    def test_bge_dense_request_uses_bge_for_all_requested_outputs(self):
+        module = load_server()
+        service = build_embedding_service(module, module.BGE_EMBEDDING_MODEL)
+        result = service.embed(
+            ["alpha"],
+            return_dense=True,
+            return_sparse=True,
+            return_colbert=True,
+            normalize_dense=True,
+        )
+        self.assertEqual(result["dense_vecs"], [[3.0, 4.0]])
+        self.assertEqual(result["lexical_weights"], [{"42": 0.5}])
+        self.assertEqual(result["colbert_vecs"], [[[0.1, 0.2]]])
+        self.assertIsNone(service.qwen_dense_backend)
+        self.assertEqual(len(service.bge_backend.calls), 1)
+        self.assertTrue(service.bge_backend.calls[0]["return_dense"])
+        self.assertTrue(service.bge_backend.calls[0]["normalize_dense"])
+
+    def test_qwen_hybrid_backend_failure_raises_without_partial_response(self):
+        module = load_server()
+        service = build_embedding_service(module, module.QWEN_DENSE_EMBEDDING_MODEL)
+        service.qwen_dense_backend = FailingQwenDenseBackend()
+        with self.assertRaisesRegex(RuntimeError, "qwen dense failed"):
+            service.embed(
+                ["alpha"],
+                return_dense=True,
+                return_sparse=True,
+                return_colbert=True,
+                normalize_dense=False,
             )
 
     def test_bge_backend_uses_flag_reranker_compute_score(self):

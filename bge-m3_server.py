@@ -280,11 +280,10 @@ class RateLimiter:
 # --- 2. Model Wrapper ---
 
 
-class M3Wrapper:
+class BgeM3EmbeddingBackend:
     """Encapsulate the BGE-M3 model, handling loading and inference.
 
-    This class provides a wrapper around the BGE-M3 model to simplify the process
-    of loading the model and performing inference with various configuration options.
+    This backend provides BGE-M3 dense, sparse, and ColBERT embeddings.
     """
 
     def __init__(
@@ -375,6 +374,110 @@ class M3Wrapper:
             norms = np.linalg.norm(dense_vecs, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-12)  # avoid division by zero
             result["dense_vecs"] = dense_vecs / norms
+
+        return result
+
+
+M3Wrapper = BgeM3EmbeddingBackend
+
+
+class QwenDenseEmbeddingBackend:
+    """Produce dense embeddings with Qwen3-Embedding."""
+
+    def __init__(self, model_name: str, device: str = device):
+        self.model_name = model_name
+        self.device = device
+        logging.info(f"Initializing Qwen dense embedding model '{model_name}'")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name, padding_side="left"
+        )
+        if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        model_kwargs = {"dtype": torch.float16} if has_cuda else {}
+        self.model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+        self.model = self.model.to(self.device).eval()
+        logging.info("Qwen dense embedding model ready.")
+
+    def embed_dense(
+        self, sentences: List[str], normalize_dense: bool = False
+    ) -> Dict[str, np.ndarray]:
+        encoded = self.tokenizer(
+            sentences,
+            padding=True,
+            truncation=True,
+            max_length=MAX_INPUT_LENGTH,
+            return_tensors="pt",
+        )
+        encoded = {
+            name: value.to(self.device) if hasattr(value, "to") else value
+            for name, value in encoded.items()
+        }
+
+        with torch.no_grad():
+            outputs = self.model(**encoded)
+            dense_vecs = outputs.last_hidden_state[:, -1, :]
+            if dense_vecs.shape[-1] != QWEN_DENSE_VECTOR_SIZE:
+                raise RuntimeError(
+                    f"{self.model_name} returned dense dimension "
+                    f"{dense_vecs.shape[-1]}, expected {QWEN_DENSE_VECTOR_SIZE}"
+                )
+            if normalize_dense:
+                dense_vecs = torch.nn.functional.normalize(dense_vecs, p=2, dim=1)
+
+        return {"dense_vecs": dense_vecs.detach().cpu().numpy()}
+
+
+class EmbeddingService:
+    """Route embedding requests between BGE-M3 and the selected dense backend."""
+
+    def __init__(
+        self,
+        bge_model_name: str,
+        dense_model_name: str,
+        devices: Optional[List[str]] = None,
+    ):
+        self.bge_model_name = bge_model_name
+        self.dense_model_name = dense_model_name
+        self.sparse_model_name = bge_model_name
+        self.colbert_model_name = bge_model_name
+        self.bge_backend = BgeM3EmbeddingBackend(bge_model_name, devices=devices)
+        self.qwen_dense_backend = (
+            QwenDenseEmbeddingBackend(dense_model_name)
+            if dense_model_name == QWEN_DENSE_EMBEDDING_MODEL
+            else None
+        )
+
+    def embed(
+        self,
+        sentences: List[str],
+        return_dense: bool = True,
+        return_sparse: bool = True,
+        return_colbert: bool = True,
+        normalize_dense: bool = False,
+    ) -> Dict[str, Union[np.ndarray, List]]:
+        result: Dict[str, Union[np.ndarray, List]] = {}
+        use_qwen_dense = self.qwen_dense_backend is not None
+        bge_return_dense = return_dense and not use_qwen_dense
+        needs_bge = bge_return_dense or return_sparse or return_colbert
+
+        if needs_bge:
+            result.update(
+                self.bge_backend.embed(
+                    sentences,
+                    return_dense=bge_return_dense,
+                    return_sparse=return_sparse,
+                    return_colbert=return_colbert,
+                    normalize_dense=normalize_dense if bge_return_dense else False,
+                )
+            )
+
+        if return_dense and use_qwen_dense:
+            result.update(
+                self.qwen_dense_backend.embed_dense(
+                    sentences, normalize_dense=normalize_dense
+                )
+            )
 
         return result
 
@@ -789,7 +892,7 @@ class RequestProcessor:
 
     def __init__(
         self,
-        model_wrapper: M3Wrapper,
+        model_wrapper: Union[BgeM3EmbeddingBackend, EmbeddingService],
         max_batch_size: int,
         accumulation_timeout: float,
         stats=None,
