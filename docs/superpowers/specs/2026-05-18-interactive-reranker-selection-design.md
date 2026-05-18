@@ -20,9 +20,11 @@ The scripts pass the chosen model to the server via `RERANKER_MODEL`. This varia
 `RerankerWrapper` selects its backend from `model_name`:
 
 - For `BAAI/bge-reranker-v2-m3`, it uses the current `FlagEmbedding.FlagReranker` code path.
-- For `Qwen/Qwen3-Reranker-0.6B`, it uses `sentence_transformers.CrossEncoder`.
+- For `Qwen/Qwen3-Reranker-0.6B`, it uses `transformers.AutoTokenizer` and `transformers.AutoModelForCausalLM` with the yes/no logit scoring method from the Qwen model card.
 
-The wrapper keeps one `score(pairs, normalize)` method. For BGE, `normalize` is passed to `compute_score`. For Qwen, raw scores come from `CrossEncoder.predict`; when `normalize=True`, sigmoid is applied to map scores to `[0, 1]`, matching the Hugging Face model card guidance.
+The wrapper keeps one `score(pairs, normalize)` method. For BGE, `normalize` is passed to `compute_score`. For Qwen, the wrapper formats each `[query, passage]` pair with the Qwen instruction template, reads the final-token logits for `yes` and `no`, applies `log_softmax`, and returns the probability of `yes`. Because this scoring path already returns a probability in `[0, 1]`, `normalize` is accepted for API compatibility but does not change Qwen scores.
+
+This avoids upgrading `sentence-transformers`. The Qwen repository currently includes Sentence Transformers integration metadata, but it was updated for newer Sentence Transformers releases; this project pins `sentence-transformers==2.7.0` to protect existing BGE reranker performance.
 
 ## Startup Flow
 
@@ -31,6 +33,8 @@ The reranker prompt runs before the final server summary in both launch scripts.
 For local mode, the scripts set/export `RERANKER_MODEL` before `uvicorn`.
 
 For Docker mode, the scripts set/export `RERANKER_MODEL` before `docker compose build` and `docker compose up -d`; `docker-compose.yml` passes it into the container with a BGE default as a defensive fallback.
+
+Qwen is not pre-downloaded during the Docker build. The first Qwen container startup may download the model into the existing Hugging Face cache volume, so Docker healthcheck timing must allow a longer first boot. This keeps BGE builds unchanged and avoids downloading both exclusive reranker options for every image build.
 
 ## Observability
 
@@ -41,8 +45,14 @@ For Docker mode, the scripts set/export `RERANKER_MODEL` before `docker compose 
 Use focused unit tests with monkeypatched fake reranker backends to avoid downloading models. Tests verify:
 
 - Default reranker model is BGE when `RERANKER_MODEL` is unset or invalid.
-- Qwen backend calls `CrossEncoder.predict`.
-- Qwen `normalize=True` applies sigmoid.
+- Qwen backend uses the tokenizer/model yes-no scorer path.
+- Qwen `normalize=True` is API-compatible and returns the same probability scores.
 - BGE backend still calls `FlagReranker.compute_score`.
+- The Docker CPU overlay does not strip the base `RERANKER_MODEL` environment entry.
+- Qwen first-boot Docker behavior is documented or healthcheck timing is adjusted.
 
 Script syntax checks cover `start_server.sh` with `bash -n`; the batch file is reviewed structurally because Windows batch has no equivalent parser available in this environment.
+
+## Documentation
+
+Update README references that describe the reranker as exclusively `BAAI/bge-reranker-v2-m3`. The docs should state that embeddings always use `BAAI/bge-m3`, while reranking is selected interactively at startup.
