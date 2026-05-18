@@ -3,7 +3,10 @@
     "allow": [
       "Bash(python -m py_compile bge-m3_server.py)",
       "PowerShell(Get-Command *)",
-      "PowerShell(py *)"
+      "PowerShell(py *)",
+      "Bash(py -m unittest test_reranker_wrapper -v)",
+      "Bash(py -m unittest test_reranker_wrapper)",
+      "Bash(py *)"
     ]
   }
 }

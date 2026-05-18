@@ -1472,6 +1472,24 @@ async def metrics():
     response_model=EmbeddingsListResponse,
     status_code=200,
     dependencies=[Depends(require_bearer_token)],
+    description=(
+        f"Generate embeddings from input texts.\n\n"
+        f"Active backends (selected at server startup):\n"
+        f"- Dense vectors: `{embedding_service.dense_model_name}`\n"
+        f"- Sparse lexical weights: `{embedding_service.sparse_model_name}`\n"
+        f"- ColBERT vectors: `{embedding_service.colbert_model_name}`\n\n"
+        "When dense backend differs from BGE, the response is hybrid: "
+        "dense vectors come from the selected dense model while sparse and "
+        "ColBERT vectors continue to come from BGE-M3.\n\n"
+        "Request options control which embedding types are computed and "
+        "returned (`return_dense`, `return_sparse`, `return_colbert`, "
+        "`normalize_dense`, `sparse_as_indices`).\n\n"
+        "Response metadata fields `model_name`, `dense_model_name`, "
+        "`sparse_model_name`, and `colbert_model_name` report the source "
+        "of each embedding type.\n\n"
+        "Errors: HTTP 400 if `sentences` is empty; HTTP 503 on queue "
+        "backpressure; HTTP 504 on GPU timeout; HTTP 500 on internal errors."
+    ),
 )
 async def get_embeddings(request: EmbedRequest):
     """Generate embeddings from input texts.
