@@ -237,6 +237,9 @@ class FakeBaseModel:
 
 
 class FakeMetric:
+    def __init__(self):
+        self.last_info = None
+
     def labels(self, *args, **kwargs):
         return self
 
@@ -253,6 +256,7 @@ class FakeMetric:
         return None
 
     def info(self, *args, **kwargs):
+        self.last_info = args[0] if args else kwargs
         return None
 
     def time(self):
@@ -540,10 +544,56 @@ class RerankerWrapperTests(unittest.TestCase):
             wrapper.score([["query", "passage"]], normalize=False),
         )
 
-    def test_health_exposes_selected_reranker_model(self):
-        module = load_server({"RERANKER_MODEL": "Qwen/Qwen3-Reranker-0.6B"})
+    def test_health_exposes_selected_models(self):
+        module = load_server(
+            {
+                "DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+                "RERANKER_MODEL": "Qwen/Qwen3-Reranker-0.6B",
+            }
+        )
         health = asyncio.run(module.health_check())
+        self.assertEqual(
+            health["dense_embedding_model"], module.QWEN_DENSE_EMBEDDING_MODEL
+        )
+        self.assertEqual(health["model"], module.BGE_EMBEDDING_MODEL)
         self.assertEqual(health["reranker_model"], module.QWEN_RERANKER_MODEL)
+
+    def test_server_info_exposes_dense_embedding_model(self):
+        module = load_server(
+            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
+        )
+        self.assertEqual(
+            module.server_info.last_info["dense_embedding_model"],
+            module.QWEN_DENSE_EMBEDDING_MODEL,
+        )
+
+    def test_embeddings_response_model_declares_backend_metadata(self):
+        module = load_server()
+        fields = module.EmbeddingsListResponse.__annotations__
+        self.assertIs(fields["model_name"], str)
+        self.assertIs(fields["dense_model_name"], str)
+        self.assertIs(fields["sparse_model_name"], str)
+        self.assertIs(fields["colbert_model_name"], str)
+
+    def test_embeddings_endpoint_uses_bge_model_name_by_default(self):
+        module = load_server({"DENSE_EMBEDDING_MODEL": "BAAI/bge-m3"})
+
+        async def fake_process_request(request):
+            return {"dense_vecs": [[1.0]]}
+
+        module.processor.process_request = fake_process_request
+        request = module.EmbedRequest(
+            sentences=["alpha"],
+            return_dense=True,
+            return_sparse=False,
+            return_colbert=False,
+            normalize_dense=False,
+            sparse_as_indices=False,
+        )
+
+        response = asyncio.run(module.get_embeddings(request))
+        self.assertEqual(response.model_name, module.BGE_EMBEDDING_MODEL)
+        self.assertEqual(response.dense_model_name, module.BGE_EMBEDDING_MODEL)
 
 
 if __name__ == "__main__":

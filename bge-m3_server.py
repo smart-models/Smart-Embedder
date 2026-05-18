@@ -378,9 +378,6 @@ class BgeM3EmbeddingBackend:
         return result
 
 
-M3Wrapper = BgeM3EmbeddingBackend
-
-
 class QwenDenseEmbeddingBackend:
     """Produce dense embeddings with Qwen3-Embedding."""
 
@@ -660,6 +657,9 @@ class EmbeddingsListResponse(BaseModel):
 
     data: List[SingleEmbeddingResponse]
     model_name: str
+    dense_model_name: str
+    sparse_model_name: str
+    colbert_model_name: str
     processing_time_ms: float
 
 
@@ -1296,11 +1296,15 @@ rate_limiter = RateLimiter(
 )
 
 # Load the models and request processor at startup.
-model = M3Wrapper("BAAI/bge-m3", devices=MULTI_GPU_DEVICES)
+embedding_service = EmbeddingService(
+    BGE_EMBEDDING_MODEL,
+    _resolve_dense_embedding_model(),
+    devices=MULTI_GPU_DEVICES,
+)
 reranker = RerankerWrapper(_resolve_reranker_model())
 stats = ServerStats()
 processor = RequestProcessor(
-    model,
+    embedding_service,
     max_batch_size=MAX_REQUESTS_IN_BATCH,
     accumulation_timeout=REQUEST_FLUSH_TIMEOUT,
     stats=stats,
@@ -1313,7 +1317,8 @@ rerank_slots = asyncio.Semaphore(RERANK_MAX_QUEUE)
 # PROMETHEUS: Set server info
 server_info.info(
     {
-        "model": "BAAI/bge-m3",
+        "model": BGE_EMBEDDING_MODEL,
+        "dense_embedding_model": embedding_service.dense_model_name,
         "version": "1.0.0",
         "gpu_available": str(has_cuda),
         "device": device,
@@ -1433,7 +1438,8 @@ async def health_check():
     return {
         "status": "healthy",
         "gpu": gpu_status,
-        "model": model.model_name,
+        "model": embedding_service.bge_model_name,
+        "dense_embedding_model": embedding_service.dense_model_name,
         "reranker_model": reranker.model_name,
         "max_input_length": MAX_INPUT_LENGTH,
         "batch_size": batch_size,
@@ -1532,7 +1538,10 @@ async def get_embeddings(request: EmbedRequest):
 
             return EmbeddingsListResponse(
                 data=response_data,
-                model_name=model.model_name,
+                model_name=embedding_service.dense_model_name,
+                dense_model_name=embedding_service.dense_model_name,
+                sparse_model_name=embedding_service.sparse_model_name,
+                colbert_model_name=embedding_service.colbert_model_name,
                 processing_time_ms=round(processing_time_ms, 2),
             )
 
