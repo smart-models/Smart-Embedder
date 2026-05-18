@@ -5,11 +5,12 @@ import logging
 import os
 import secrets
 import time
+import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
 import numpy as np
@@ -18,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -40,6 +42,22 @@ logging.basicConfig(
 # Multi-GPU configuration (optional - set to None for single GPU)
 # Example: ['cuda:0', 'cuda:1'] for multi-GPU or None for single GPU
 MULTI_GPU_DEVICES = None  # Change this to enable multi-GPU support
+BGE_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+QWEN_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+QWEN_RERANKER_INSTRUCTION = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
+QWEN_RERANKER_PREFIX = (
+    "<|im_start|>system\n"
+    "Judge whether the Document meets the requirements based on the Query and "
+    'the Instruct provided. Note that the answer can only be "yes" or "no".'
+    "<|im_end|>\n<|im_start|>user\n"
+)
+QWEN_RERANKER_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+SUPPORTED_RERANKER_MODELS = {
+    BGE_RERANKER_MODEL,
+    QWEN_RERANKER_MODEL,
+}
 
 # GPU detection and dynamic parameter configuration
 has_cuda = torch.cuda.is_available()
@@ -111,6 +129,20 @@ RERANK_MAX_QUEUE = _env_int_range("RERANK_MAX_QUEUE", 32, min_value=1, max_value
 RERANK_GPU_TIMEOUT = _env_int_range(
     "RERANK_GPU_TIMEOUT", 15, min_value=1, max_value=3600
 )
+QWEN_RERANK_MAX_LENGTH = _env_int_range(
+    "QWEN_RERANK_MAX_LENGTH", 8192, min_value=128, max_value=32768
+)
+
+
+def _resolve_reranker_model() -> str:
+    configured = os.getenv("RERANKER_MODEL", BGE_RERANKER_MODEL).strip()
+    if configured in SUPPORTED_RERANKER_MODELS:
+        return configured
+
+    logging.warning(
+        f"Unsupported RERANKER_MODEL '{configured}', using {BGE_RERANKER_MODEL}"
+    )
+    return BGE_RERANKER_MODEL
 
 # --- Authentication ---
 # Bearer token for API access. Leave empty to disable authentication.
@@ -583,21 +615,26 @@ def lexical_weights_to_indices(lw: Dict[str, float]) -> SparseIndicesVector:
 
 
 class RerankerWrapper:
-    """Encapsulate the BGE-Reranker-v2-m3 model for cross-encoder scoring.
-
-    Loads the reranker model once at startup and exposes a thread-safe
-    scoring method compatible with the existing ThreadPoolExecutor.
-    """
+    """Encapsulate the selected reranker model for cross-encoder scoring."""
 
     def __init__(self, model_name: str):
         self.model_name = model_name
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self._score_fn: Callable[[List[List[str]], bool], List[float]]
+
+        if self.model_name == QWEN_RERANKER_MODEL:
+            self._init_qwen()
+        else:
+            self._init_bge()
+
+    def _init_bge(self) -> None:
         use_fp16 = has_cuda
         logging.info(
-            f"Initializing reranker '{self.model_name}' on '{device}' "
+            f"Initializing BGE reranker '{self.model_name}' on '{device}' "
             f"with FP16: {use_fp16}"
         )
         self.model = FlagReranker(self.model_name, use_fp16=use_fp16)
-        self.executor = ThreadPoolExecutor(max_workers=1)
+        self._score_fn = self._score_bge
 
         if has_cuda:
             logging.info("Performing reranker warm-up...")
@@ -606,20 +643,117 @@ class RerankerWrapper:
             )
         logging.info("Reranker ready.")
 
+    def _init_qwen(self) -> None:
+        logging.info(f"Initializing Qwen reranker '{self.model_name}' on '{device}'")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name, padding_side="left"
+        )
+        # Qwen3-Reranker tokenizer ships without a pad_token; reuse EOS so
+        # tokenizer.pad() does not raise. Required for batched scoring.
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        model_kwargs = {"dtype": torch.float16} if has_cuda else {}
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name, **model_kwargs
+        ).to(device).eval()
+        self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
+        self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
+        self.prefix_tokens = self.tokenizer.encode(
+            QWEN_RERANKER_PREFIX, add_special_tokens=False
+        )
+        self.suffix_tokens = self.tokenizer.encode(
+            QWEN_RERANKER_SUFFIX, add_special_tokens=False
+        )
+        self._score_fn = self._score_qwen
+
+        if has_cuda:
+            logging.info("Performing reranker warm-up...")
+            _ = self._score_qwen([["warm-up query", "warm-up passage"]], normalize=False)
+        logging.info("Reranker ready.")
+
     def score(self, pairs: List[List[str]], normalize: bool) -> List[float]:
         """Compute relevance scores for a list of [query, passage] pairs.
 
         Args:
             pairs: List of [query, passage] pairs to score
-            normalize: If True, applies sigmoid to map scores to [0, 1]
+            normalize: Backend-compatible normalization flag
 
         Returns:
             List of float scores, one per pair
         """
+        return self._score_fn(pairs, normalize)
+
+    def _score_bge(self, pairs: List[List[str]], normalize: bool) -> List[float]:
         raw = self.model.compute_score(pairs, normalize=normalize)
+        return self._coerce_scores(raw)
+
+    def _score_qwen(self, pairs: List[List[str]], normalize: bool) -> List[float]:
+        # Qwen returns yes-probabilities; keep normalize for API-compatible calls.
+        _ = normalize
+        formatted_pairs = [
+            self._format_qwen_instruction(query, passage) for query, passage in pairs
+        ]
+        inputs = self._tokenize_qwen_pairs(formatted_pairs)
+
+        with torch.no_grad():
+            batch_scores = self.model(**inputs).logits[:, -1, :]
+            true_vector = batch_scores[:, self.token_true_id]
+            false_vector = batch_scores[:, self.token_false_id]
+            binary_scores = torch.stack([false_vector, true_vector], dim=1)
+            probabilities = torch.nn.functional.log_softmax(binary_scores, dim=1)
+            return probabilities[:, 1].exp().detach().cpu().tolist()
+
+    def _format_qwen_instruction(self, query: str, passage: str) -> str:
+        return (
+            f"<Instruct>: {QWEN_RERANKER_INSTRUCTION}\n"
+            f"<Query>: {query}\n"
+            f"<Document>: {passage}"
+        )
+
+    def _tokenize_qwen_pairs(
+        self, formatted_pairs: List[str]
+    ) -> Dict[str, torch.Tensor]:
+        max_pair_length = max(
+            1,
+            QWEN_RERANK_MAX_LENGTH
+            - len(self.prefix_tokens)
+            - len(self.suffix_tokens),
+        )
+        # Two-step encode+pad is required so prefix/suffix tokens can be
+        # injected per-pair. Suppress the fast-tokenizer informational notice
+        # that suggests collapsing it into a single __call__.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="You're using a Qwen2TokenizerFast tokenizer",
+            )
+            inputs = self.tokenizer(
+                formatted_pairs,
+                padding=False,
+                truncation="longest_first",
+                return_attention_mask=False,
+                max_length=max_pair_length,
+            )
+        for index, input_ids in enumerate(inputs["input_ids"]):
+            inputs["input_ids"][index] = (
+                self.prefix_tokens + input_ids + self.suffix_tokens
+            )
+        # max_length is ignored by pad() without truncation; truncation was
+        # already applied above, so omit it to silence the UserWarning.
+        padded = self.tokenizer.pad(
+            inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        return {key: value.to(device) for key, value in padded.items()}
+
+    @staticmethod
+    def _coerce_scores(raw) -> List[float]:
         if isinstance(raw, (int, float)):
             return [float(raw)]
-        return [float(s) for s in raw]
+        if hasattr(raw, "tolist"):
+            raw = raw.tolist()
+        return [float(score) for score in raw]
 
 
 # --- 4. Asynchronous Request Processor with Batching ---
@@ -1040,7 +1174,7 @@ rate_limiter = RateLimiter(
 
 # Load the models and request processor at startup.
 model = M3Wrapper("BAAI/bge-m3", devices=MULTI_GPU_DEVICES)
-reranker = RerankerWrapper("BAAI/bge-reranker-v2-m3")
+reranker = RerankerWrapper(_resolve_reranker_model())
 stats = ServerStats()
 processor = RequestProcessor(
     model,
@@ -1177,6 +1311,7 @@ async def health_check():
         "status": "healthy",
         "gpu": gpu_status,
         "model": model.model_name,
+        "reranker_model": reranker.model_name,
         "max_input_length": MAX_INPUT_LENGTH,
         "batch_size": batch_size,
         "max_requests_in_batch": MAX_REQUESTS_IN_BATCH,
@@ -1301,24 +1436,23 @@ async def get_embeddings(request: EmbedRequest):
     response_model=RerankResponse,
     status_code=200,
     dependencies=[Depends(require_bearer_token)],
+    description=(
+        f"Score and rank passages by relevance to a query using "
+        f"`{reranker.model_name}`.\n\n"
+        "Accepts a query string and a list of candidate passages. "
+        "Returns all passages sorted by descending relevance score.\n\n"
+        "- BGE backend: `normalize=true` applies sigmoid to map raw logits "
+        "into `[0, 1]`; `normalize=false` returns the raw logit "
+        "(negative values possible).\n"
+        "- Qwen backend: scores are yes-probabilities in `[0, 1]`; "
+        "`normalize` is kept as an API-compatible no-op.\n\n"
+        "Errors: HTTP 400 if query or passages list is empty; HTTP 503 on "
+        "rerank queue backpressure; HTTP 504 on GPU timeout; HTTP 500 on "
+        "internal model errors."
+    ),
 )
 async def rerank(request: RerankRequest):
-    """Score and rank passages by relevance to a query using BGE-Reranker-v2-m3.
-
-    Accepts a query string and a list of candidate passages.
-    Returns all passages sorted by their relevance score (descending).
-    Optionally normalizes scores to the [0, 1] range via sigmoid.
-
-    Args:
-        request: RerankRequest with query, passages, and normalize flag
-
-    Returns:
-        RerankResponse: Passages sorted by score with processing metadata
-
-    Raises:
-        HTTPException 400: If query or passages list is empty
-        HTTPException 500: On internal model errors
-    """
+    """Score and rank passages using the reranker selected at startup."""
     with rerank_request_duration.time():
         if not request.query.strip():
             rerank_requests_total.labels(status="error").inc()

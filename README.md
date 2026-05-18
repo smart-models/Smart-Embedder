@@ -1,11 +1,11 @@
 # BGE-M3 Embedding & Reranker Server
 
-High-performance FastAPI server serving two BAAI models:
+High-performance FastAPI server for BGE-M3 embeddings and selectable reranking:
 
 | Feature | Detail |
 |---|---|
 | **Embedding** | `BAAI/bge-m3` - dense, sparse, ColBERT vectors |
-| **Reranking** | `BAAI/bge-reranker-v2-m3` - cross-encoder scoring |
+| **Reranking** | Interactive startup choice: `BAAI/bge-reranker-v2-m3` or `Qwen/Qwen3-Reranker-0.6B` |
 | **Authentication** | Optional Bearer token on non-public endpoints |
 | **Rate Limiting** | Token bucket, 3600 req/min per IP, burst 120 |
 | **Backpressure** | Embedding queue max 200, rerank slots max 32, HTTP 503 on overflow |
@@ -45,6 +45,9 @@ start_server.bat [local|docker] [cpu|gpu|auto]
 | `start_server.bat docker cpu` | Compose with override `docker-compose.cpu.yml` (no GPU) |
 
 Arguments are case-insensitive. Built-in validation: unrecognized parameters print usage and exit with code 1.
+
+Both startup scripts always prompt for the reranker before launching the server.
+Choose BGE to preserve the original behavior, or QWEN to use `Qwen/Qwen3-Reranker-0.6B`.
 
 **`local` mode**: requires `.venv` already created (see step 1). The script activates venv, checks for `uvicorn`, installs dependencies if missing, then starts the server.
 
@@ -147,7 +150,7 @@ sudo systemctl restart docker
 # Verify CUDA tag exists before building
 docker pull nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
-# Build and GPU startup (first time: downloads ~3 GB of models)
+# Build and GPU startup (first time: downloads embedding and selected reranker models)
 docker compose up --build
 
 # Or via bat wrapper (Windows)
@@ -169,6 +172,10 @@ Server available at `http://localhost:8000`.
 Models are saved in the default named volume
 `bge-m3-embedder-reranker-hf-cache` and mounted at `/app/model_cache`;
 subsequent restarts do not re-download them.
+
+The first Docker startup with QWEN selected downloads `Qwen/Qwen3-Reranker-0.6B`
+into the Hugging Face cache volume. Startup can take longer than BGE on an empty
+cache; later runs reuse the cached model.
 
 ### Useful Commands
 
@@ -329,8 +336,10 @@ Ranks a list of passages by relevance to a query.
 
 - `normalize: true` returns a score in `[0, 1]` (sigmoid)
 - `normalize: false` returns a raw score (negative values possible)
+- With QWEN selected, scores are yes-probabilities and `normalize` is kept as an API-compatible no-op
 - Passages are returned sorted by **descending** score
 - The `index` field returns the original position in the input list
+- `model_name` reports the reranker selected at startup
 
 **cURL:**
 ```bash
@@ -402,6 +411,8 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 | `MAX_RERANK_PASSAGES` | `128` | Max passages per rerank request |
 | `MAX_RERANK_TEXT_CHARS` | `20000` | Max chars per rerank query/passage |
 | `MAX_RERANK_TOTAL_CHARS` | `250000` | Max total chars per rerank request |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker selected by launcher (`BAAI/bge-reranker-v2-m3` or `Qwen/Qwen3-Reranker-0.6B`) |
+| `QWEN_RERANK_MAX_LENGTH` | `8192` | Max Qwen reranker token length when QWEN is selected |
 | `API_TOKEN` | empty | Optional bearer token for non-public endpoints; empty disables authentication |
 | `MAX_QUEUE_SIZE` | `200` | Max requests in queue `/embeddings/` (backpressure) |
 | `RERANK_MAX_QUEUE` | `32` | Max concurrent slots for `/rerank` (backpressure) |
@@ -587,7 +598,7 @@ Error: manifest for nvidia/cuda:12.6.3-runtime-ubuntu22.04 not found
 Search correct tag on [hub.docker.com/r/nvidia/cuda/tags](https://hub.docker.com/r/nvidia/cuda/tags) and update first line of `Dockerfile`.
 
 ### Docker: Container Unhealthy on First Startup
-Model download (~3 GB) may exceed `start_period: 180s`.  
+Model download may exceed the Compose healthcheck start period.
 Increase in `docker-compose.yml`:
 ```yaml
 start_period: 300s
@@ -599,6 +610,7 @@ start_period: 300s
 
 - [BAAI/bge-m3 - Hugging Face](https://huggingface.co/BAAI/bge-m3)
 - [BAAI/bge-reranker-v2-m3 - Hugging Face](https://huggingface.co/BAAI/bge-reranker-v2-m3)
+- [Qwen/Qwen3-Reranker-0.6B - Hugging Face](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B)
 - [FlagEmbedding - GitHub](https://github.com/FlagOpen/FlagEmbedding)
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [Prometheus Python Client](https://github.com/prometheus/client_python)
@@ -607,4 +619,5 @@ start_period: 300s
 
 ## License
 
-Follows BAAI model license (`BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`) - MIT.
+Follows the selected model licenses (`BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`,
+and optionally `Qwen/Qwen3-Reranker-0.6B`).

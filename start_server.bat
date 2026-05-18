@@ -22,6 +22,23 @@ for %%A in (AUTO auto Auto) do if /I "%DEVICE%"=="%%A" set "DEVICE=auto"
 if not "%MODE%"=="local" if not "%MODE%"=="docker" goto :usage
 if not "%DEVICE%"=="cpu" if not "%DEVICE%"=="gpu" if not "%DEVICE%"=="auto" goto :usage
 
+echo ======================================
+echo  Select reranker
+echo ======================================
+echo.
+echo Do you want to use:
+echo   [1] BGE  ^(BAAI/bge-reranker-v2-m3^)
+echo   [2] QWEN ^(Qwen/Qwen3-Reranker-0.6B^)
+echo.
+set /p reranker_choice="Enter choice ^(1 or 2^): "
+if "%reranker_choice%"=="2" (
+    set "RERANKER_MODEL=Qwen/Qwen3-Reranker-0.6B"
+) else (
+    if not "%reranker_choice%"=="" if not "%reranker_choice%"=="1" echo [WARNING] Invalid choice, defaulting to BGE
+    set "RERANKER_MODEL=BAAI/bge-reranker-v2-m3"
+)
+echo.
+
 REM Check if CUDA GPU is available
 if "%DEVICE%"=="auto" (
     nvidia-smi >nul 2>&1
@@ -70,6 +87,7 @@ echo ========================================
 echo  BGE-M3 Embedding Server
 echo  Mode:   %MODE%
 echo  Device: %DEVICE%
+echo  Reranker: %RERANKER_MODEL%
 echo ========================================
 echo.
 

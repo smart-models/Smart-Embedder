@@ -49,6 +49,43 @@ ask_gpu_or_cpu() {
     esac
 }
 
+ask_reranker() {
+    echo "======================================" >&2
+    echo "  Select reranker" >&2
+    echo "======================================" >&2
+    echo "" >&2
+    echo "Do you want to use:" >&2
+    echo "  [1] BGE  (BAAI/bge-reranker-v2-m3)" >&2
+    echo "  [2] QWEN (Qwen/Qwen3-Reranker-0.6B)" >&2
+    echo "" >&2
+    read -r -p "Enter choice (1 or 2): " choice >&2
+
+    case "$choice" in
+        2) echo "Qwen/Qwen3-Reranker-0.6B" ;;
+        1) echo "BAAI/bge-reranker-v2-m3" ;;
+        *)
+            echo "[WARNING] Invalid choice, defaulting to BGE" >&2
+            echo "BAAI/bge-reranker-v2-m3"
+            ;;
+    esac
+}
+
+# Validate mode and device
+if [[ "$MODE" != "local" && "$MODE" != "docker" ]]; then
+    echo "[ERROR] Invalid mode: $MODE"
+    echo "Usage: $0 [local|docker] [cpu|gpu|auto]"
+    exit 1
+fi
+
+if [[ "$DEVICE" != "cpu" && "$DEVICE" != "gpu" && "$DEVICE" != "auto" ]]; then
+    echo "[ERROR] Invalid device: $DEVICE"
+    echo "Usage: $0 [local|docker] [cpu|gpu|auto]"
+    exit 1
+fi
+
+RERANKER_MODEL="$(ask_reranker)"
+export RERANKER_MODEL
+
 # Auto-detect device if not specified
 if [[ "$DEVICE" == "auto" ]]; then
     if check_cuda; then
@@ -66,23 +103,11 @@ if [[ "$DEVICE" == "auto" ]]; then
     fi
 fi
 
-# Validate mode and device
-if [[ "$MODE" != "local" && "$MODE" != "docker" ]]; then
-    echo "[ERROR] Invalid mode: $MODE"
-    echo "Usage: $0 [local|docker] [cpu|gpu|auto]"
-    exit 1
-fi
-
-if [[ "$DEVICE" != "cpu" && "$DEVICE" != "gpu" ]]; then
-    echo "[ERROR] Invalid device: $DEVICE"
-    echo "Usage: $0 [local|docker] [cpu|gpu|auto]"
-    exit 1
-fi
-
 echo "========================================"
 echo "  BGE-M3 Embedding Server"
 echo "  Mode:   $MODE"
 echo "  Device: $DEVICE"
+echo "  Reranker: $RERANKER_MODEL"
 echo "========================================"
 echo ""
 

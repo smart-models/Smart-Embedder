@@ -25,6 +25,8 @@ services:
       MAX_RERANK_PASSAGES: ${MAX_RERANK_PASSAGES:-128}
       MAX_RERANK_TEXT_CHARS: ${MAX_RERANK_TEXT_CHARS:-20000}
       MAX_RERANK_TOTAL_CHARS: ${MAX_RERANK_TOTAL_CHARS:-250000}
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      QWEN_RERANK_MAX_LENGTH: ${QWEN_RERANK_MAX_LENGTH:-8192}
       API_TOKEN: ${API_TOKEN:-}
       # Tuned on RTX 4060 8GB: peak ~30-44 req/s @ conc=8
       MAX_QUEUE_SIZE: ${MAX_QUEUE_SIZE:-200}
@@ -55,7 +57,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s
+      start_period: 300s
     logging:
       driver: json-file
       options:

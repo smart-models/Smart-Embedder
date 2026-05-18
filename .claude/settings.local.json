@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile bge-m3_server.py)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(py *)"
+    ]
+  }
+}
