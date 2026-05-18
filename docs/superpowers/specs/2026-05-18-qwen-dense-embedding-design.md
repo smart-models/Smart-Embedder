@@ -28,7 +28,7 @@ If Qwen dense is enabled and a request asks for all embedding types, the respons
 
 ## Non-Goals
 
-This change does not add a new endpoint, remove BGE-M3, alter reranker selection, introduce query/document-specific embedding prompts, or change sparse and ColBERT semantics.
+This change does not add a new endpoint, remove BGE-M3, alter reranker selection, introduce query/document-specific embedding prompts, or change sparse and ColBERT semantics. The no-prompt choice keeps the replacement transparent, but README should call out that Qwen task-specific query/document instructions may improve retrieval quality for deployments that can adopt a less transparent API.
 
 The Qwen dense embedding model is independent from the existing Qwen reranker. The launchers may select Qwen for dense embedding, reranking, both, or neither.
 
@@ -84,7 +84,7 @@ Use the direct Transformers path to avoid changing the existing `sentence-transf
 - batch tokenization with `padding=True`, `truncation=True`, `max_length=MAX_INPUT_LENGTH`, and `return_tensors="pt"`
 - move tensors to `device`
 - run inference under `torch.no_grad()`
-- use last-token pooling from `outputs.last_hidden_state[:, -1, :]`
+- use last-token pooling from `outputs.last_hidden_state[:, -1, :]`; this depends on `padding_side="left"` so the real final token is at `-1`
 - assert the final vector dimension is `1024`
 - apply L2 normalization only when `normalize_dense=true`
 - return data under `dense_vecs`, matching the existing BGE result structure
@@ -128,13 +128,17 @@ Required coverage:
 - default dense model resolves to `BAAI/bge-m3`
 - unsupported dense model falls back to `BAAI/bge-m3`
 - Qwen dense selection initializes the Qwen dense backend
+- Qwen dense load failure fails server startup
 - dense-only Qwen request calls only Qwen
 - sparse/ColBERT-only request with Qwen configured calls only BGE
 - hybrid request merges Qwen dense with BGE sparse and ColBERT outputs
+- hybrid request backend failure raises an error instead of returning partial embeddings
 - `normalize_dense=true` is honored for Qwen dense
 - Qwen dense vector dimension is validated as 1024
 - `/embeddings/` response includes `model_name`, `dense_model_name`, `sparse_model_name`, and `colbert_model_name`
+- default BGE dense selection keeps `model_name` as `BAAI/bge-m3`
 - `/health` includes `dense_embedding_model`
+- Prometheus `server_info` includes `dense_embedding_model`
 - `docker-compose.yml` passes `DENSE_EMBEDDING_MODEL`
 - `.env.example`, `start_server.bat`, `start_server.sh`, and `README.md` document the new selection
 
@@ -146,3 +150,5 @@ README should explain that embeddings can now be hybrid:
 - Qwen dense means `dense` is Qwen while `sparse` and `colbert` remain BGE-M3.
 
 The configuration table should document `DENSE_EMBEDDING_MODEL`. Startup examples should mention that dense embedding selection and reranker selection are independent prompts.
+
+README should also state that the Qwen dense path intentionally does not add query/document instruction prefixes. This preserves the existing `/embeddings/` API shape, but teams chasing maximum retrieval quality should evaluate task-specific Qwen formatting separately.

@@ -32,18 +32,22 @@ Add these tests to `RerankerWrapperTests` in `test_reranker_wrapper.py`:
 
 ```python
     def test_resolve_dense_embedding_model_defaults_to_bge_for_invalid_value(self):
-        module = load_server({"DENSE_EMBEDDING_MODEL": "invalid"})
-        self.assertEqual(
-            module._resolve_dense_embedding_model(), module.BGE_EMBEDDING_MODEL
-        )
+        module = load_server()
+        with patch.dict(os.environ, {"DENSE_EMBEDDING_MODEL": "invalid"}):
+            self.assertEqual(
+                module._resolve_dense_embedding_model(), module.BGE_EMBEDDING_MODEL
+            )
 
     def test_resolve_dense_embedding_model_accepts_qwen(self):
-        module = load_server(
-            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
-        )
-        self.assertEqual(
-            module._resolve_dense_embedding_model(), module.QWEN_DENSE_EMBEDDING_MODEL
-        )
+        module = load_server()
+        with patch.dict(
+            os.environ,
+            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"},
+        ):
+            self.assertEqual(
+                module._resolve_dense_embedding_model(),
+                module.QWEN_DENSE_EMBEDDING_MODEL,
+            )
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
@@ -99,13 +103,20 @@ In `test_reranker_wrapper.py`, add this fake class near `FakeAutoModelForCausalL
 class FakeAutoModel:
     @classmethod
     def from_pretrained(cls, model_name, **kwargs):
-        return FakeEmbeddingModel()
+        if os.getenv("FAKE_QWEN_DENSE_LOAD_ERROR") == "1":
+            raise RuntimeError("qwen dense load failed")
+        dense_size = int(os.getenv("FAKE_QWEN_DENSE_DIM", "1024"))
+        return FakeEmbeddingModel(dense_size)
 ```
 
 Add this fake model near `FakeCausalLM`:
 
 ```python
 class FakeEmbeddingModel:
+    def __init__(self, dense_size=1024):
+        self.dense_size = dense_size
+        self.last_dense_tensor = None
+
     def to(self, device):
         return self
 
@@ -113,7 +124,10 @@ class FakeEmbeddingModel:
         return self
 
     def __call__(self, **inputs):
-        return types.SimpleNamespace(last_hidden_state=FakeEmbeddingTensor())
+        self.last_dense_tensor = FakeDenseTensor(self.dense_size)
+        return types.SimpleNamespace(
+            last_hidden_state=FakeEmbeddingTensor(self.last_dense_tensor)
+        )
 ```
 
 Add this tensor near `FakeTensor`:
@@ -122,11 +136,17 @@ Add this tensor near `FakeTensor`:
 class FakeEmbeddingTensor:
     shape = (1, 1, 1024)
 
+    def __init__(self, dense_tensor):
+        self.dense_tensor = dense_tensor
+
     def __getitem__(self, key):
-        return FakeDenseTensor()
+        return self.dense_tensor
 
 class FakeDenseTensor:
-    shape = (1, 1024)
+    def __init__(self, dense_size=1024):
+        self.dense_size = dense_size
+        self.shape = (1, dense_size)
+        self.normalized = False
 
     def detach(self):
         return self
@@ -135,10 +155,36 @@ class FakeDenseTensor:
         return self
 
     def numpy(self):
-        return [[1.0] * 1024]
+        return [[1.0] * self.dense_size]
 ```
 
-Update `load_server()`:
+Update `FakeTorchModule.__init__` so `functional` includes dense normalization support:
+
+```python
+        self.nn = types.SimpleNamespace(
+            functional=types.SimpleNamespace(
+                log_softmax=self._log_softmax,
+                normalize=self._normalize,
+            )
+        )
+```
+
+Add this method to `FakeTorchModule`:
+
+```python
+    def _normalize(self, value, p=2, dim=1):
+        value.normalized = True
+        return value
+```
+
+Update `load_server()`. Replace:
+
+```python
+    fake_transformers.AutoTokenizer = FakeAutoTokenizer
+    fake_transformers.AutoModelForCausalLM = FakeAutoModelForCausalLM
+```
+
+with:
 
 ```python
     fake_transformers.AutoModel = FakeAutoModel
@@ -154,7 +200,7 @@ Run:
 py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_resolve_dense_embedding_model_defaults_to_bge_for_invalid_value test_reranker_wrapper.RerankerWrapperTests.test_resolve_dense_embedding_model_accepts_qwen
 ```
 
-Expected: both tests pass.
+Expected: both resolver tests pass.
 
 - [ ] **Step 6: Commit**
 
@@ -216,6 +262,11 @@ class TrackingQwenDenseBackend:
             {"sentences": sentences, "normalize_dense": normalize_dense}
         )
         return {"dense_vecs": [[9.0] * 1024 for _ in sentences]}
+
+
+class FailingQwenDenseBackend:
+    def embed_dense(self, sentences, normalize_dense=False):
+        raise RuntimeError("qwen dense failed")
 ```
 
 Add this factory helper:
@@ -307,6 +358,19 @@ Add these tests:
         self.assertEqual(len(service.bge_backend.calls), 1)
         self.assertTrue(service.bge_backend.calls[0]["return_dense"])
         self.assertTrue(service.bge_backend.calls[0]["normalize_dense"])
+
+    def test_qwen_hybrid_backend_failure_raises_without_partial_response(self):
+        module = load_server()
+        service = build_embedding_service(module, module.QWEN_DENSE_EMBEDDING_MODEL)
+        service.qwen_dense_backend = FailingQwenDenseBackend()
+        with self.assertRaisesRegex(RuntimeError, "qwen dense failed"):
+            service.embed(
+                ["alpha"],
+                return_dense=True,
+                return_sparse=True,
+                return_colbert=True,
+                normalize_dense=False,
+            )
 ```
 
 - [ ] **Step 2: Run service tests and verify failure**
@@ -314,7 +378,7 @@ Add these tests:
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_only_request_calls_only_qwen_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_sparse_colbert_request_calls_only_bge_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_hybrid_request_merges_dense_with_bge_sparse_and_colbert test_reranker_wrapper.RerankerWrapperTests.test_bge_dense_request_uses_bge_for_all_requested_outputs
+py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_only_request_calls_only_qwen_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_sparse_colbert_request_calls_only_bge_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_hybrid_request_merges_dense_with_bge_sparse_and_colbert test_reranker_wrapper.RerankerWrapperTests.test_bge_dense_request_uses_bge_for_all_requested_outputs test_reranker_wrapper.RerankerWrapperTests.test_qwen_hybrid_backend_failure_raises_without_partial_response
 ```
 
 Expected: tests fail because `EmbeddingService` does not exist.
@@ -334,6 +398,14 @@ class BgeM3EmbeddingBackend:
 ```
 
 Keep the constructor and `embed(...)` behavior the same except for docstrings that should describe BGE-M3 specifically.
+
+Add this temporary compatibility alias immediately after the renamed class:
+
+```python
+M3Wrapper = BgeM3EmbeddingBackend
+```
+
+This keeps the module importable until Task 3 replaces the global `model = M3Wrapper(...)` initialization with `embedding_service = EmbeddingService(...)`.
 
 - [ ] **Step 4: Add Qwen dense backend**
 
@@ -457,17 +529,17 @@ Change the constructor hint from:
 to:
 
 ```python
-        model_wrapper: EmbeddingService,
+        model_wrapper: Union[BgeM3EmbeddingBackend, EmbeddingService],
 ```
 
-Leave the attribute name `model_wrapper` for a small diff.
+Leave the attribute name `model_wrapper` for a small diff. The union keeps the intermediate Task 2 state accurate while the global startup path still uses the temporary `M3Wrapper` alias.
 
 - [ ] **Step 7: Run service tests and verify pass**
 
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_only_request_calls_only_qwen_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_sparse_colbert_request_calls_only_bge_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_hybrid_request_merges_dense_with_bge_sparse_and_colbert test_reranker_wrapper.RerankerWrapperTests.test_bge_dense_request_uses_bge_for_all_requested_outputs
+py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_only_request_calls_only_qwen_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_sparse_colbert_request_calls_only_bge_backend test_reranker_wrapper.RerankerWrapperTests.test_qwen_hybrid_request_merges_dense_with_bge_sparse_and_colbert test_reranker_wrapper.RerankerWrapperTests.test_bge_dense_request_uses_bge_for_all_requested_outputs test_reranker_wrapper.RerankerWrapperTests.test_qwen_hybrid_backend_failure_raises_without_partial_response
 ```
 
 Expected: all service orchestration tests pass.
@@ -487,7 +559,41 @@ git commit -m "feat: route dense embeddings through selectable backend"
 - Modify: `test_reranker_wrapper.py`
 - Modify: `bge-m3_server.py`
 
-- [ ] **Step 1: Write failing health metadata test**
+- [ ] **Step 1: Write failing health and metrics metadata tests**
+
+Update `FakeMetric` so tests can inspect the `Info.info(...)` payload. Replace:
+
+```python
+class FakeMetric:
+    def labels(self, *args, **kwargs):
+        return self
+```
+
+with:
+
+```python
+class FakeMetric:
+    def __init__(self):
+        self.last_info = None
+
+    def labels(self, *args, **kwargs):
+        return self
+```
+
+Replace the `info()` method:
+
+```python
+    def info(self, *args, **kwargs):
+        return None
+```
+
+with:
+
+```python
+    def info(self, *args, **kwargs):
+        self.last_info = args[0] if args else kwargs
+        return None
+```
 
 Replace `test_health_exposes_selected_reranker_model` with:
 
@@ -505,6 +611,15 @@ Replace `test_health_exposes_selected_reranker_model` with:
         )
         self.assertEqual(health["model"], module.BGE_EMBEDDING_MODEL)
         self.assertEqual(health["reranker_model"], module.QWEN_RERANKER_MODEL)
+
+    def test_server_info_exposes_dense_embedding_model(self):
+        module = load_server(
+            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
+        )
+        self.assertEqual(
+            module.server_info.last_info["dense_embedding_model"],
+            module.QWEN_DENSE_EMBEDDING_MODEL,
+        )
 ```
 
 - [ ] **Step 2: Write failing response model metadata test**
@@ -519,6 +634,26 @@ Add this test:
         self.assertIs(fields["dense_model_name"], str)
         self.assertIs(fields["sparse_model_name"], str)
         self.assertIs(fields["colbert_model_name"], str)
+
+    def test_embeddings_endpoint_uses_bge_model_name_by_default(self):
+        module = load_server({"DENSE_EMBEDDING_MODEL": "BAAI/bge-m3"})
+
+        async def fake_process_request(request):
+            return {"dense_vecs": [[1.0]]}
+
+        module.processor.process_request = fake_process_request
+        request = module.EmbedRequest(
+            sentences=["alpha"],
+            return_dense=True,
+            return_sparse=False,
+            return_colbert=False,
+            normalize_dense=False,
+            sparse_as_indices=False,
+        )
+
+        response = asyncio.run(module.get_embeddings(request))
+        self.assertEqual(response.model_name, module.BGE_EMBEDDING_MODEL)
+        self.assertEqual(response.dense_model_name, module.BGE_EMBEDDING_MODEL)
 ```
 
 - [ ] **Step 3: Run metadata tests and verify failure**
@@ -526,10 +661,10 @@ Add this test:
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_health_exposes_selected_models test_reranker_wrapper.RerankerWrapperTests.test_embeddings_response_model_declares_backend_metadata
+py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_health_exposes_selected_models test_reranker_wrapper.RerankerWrapperTests.test_server_info_exposes_dense_embedding_model test_reranker_wrapper.RerankerWrapperTests.test_embeddings_response_model_declares_backend_metadata test_reranker_wrapper.RerankerWrapperTests.test_embeddings_endpoint_uses_bge_model_name_by_default
 ```
 
-Expected: health test fails because `dense_embedding_model` is absent, and response metadata test fails because the new response fields are not annotated yet.
+Expected: health and server info tests fail because `dense_embedding_model` is absent, response metadata test fails because the new response fields are not annotated yet, and the endpoint test fails because the response does not expose `dense_model_name` yet.
 
 - [ ] **Step 4: Add response metadata fields**
 
@@ -574,6 +709,12 @@ reranker = RerankerWrapper(_resolve_reranker_model())
 stats = ServerStats()
 processor = RequestProcessor(
     embedding_service,
+```
+
+Delete the temporary alias from Task 2 after this replacement:
+
+```python
+M3Wrapper = BgeM3EmbeddingBackend
 ```
 
 - [ ] **Step 6: Update Prometheus server info**
@@ -632,10 +773,10 @@ with:
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_health_exposes_selected_models test_reranker_wrapper.RerankerWrapperTests.test_embeddings_response_model_declares_backend_metadata
+py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_health_exposes_selected_models test_reranker_wrapper.RerankerWrapperTests.test_server_info_exposes_dense_embedding_model test_reranker_wrapper.RerankerWrapperTests.test_embeddings_response_model_declares_backend_metadata test_reranker_wrapper.RerankerWrapperTests.test_embeddings_endpoint_uses_bge_model_name_by_default
 ```
 
-Expected: both tests pass.
+Expected: all four metadata tests pass.
 
 - [ ] **Step 10: Commit**
 
@@ -652,28 +793,7 @@ git commit -m "feat: expose embedding backend metadata"
 - Modify: `test_reranker_wrapper.py`
 - Modify: `bge-m3_server.py`
 
-- [ ] **Step 1: Add fake normalization support**
-
-In `FakeTorchModule.__init__`, replace the `functional` namespace with:
-
-```python
-        self.nn = types.SimpleNamespace(
-            functional=types.SimpleNamespace(
-                log_softmax=self._log_softmax,
-                normalize=self._normalize,
-            )
-        )
-```
-
-Add this method to `FakeTorchModule`:
-
-```python
-    def _normalize(self, value, p=2, dim=1):
-        value.normalized = True
-        return value
-```
-
-- [ ] **Step 2: Write failing Qwen backend tests**
+- [ ] **Step 1: Write failing Qwen backend tests**
 
 Add these tests:
 
@@ -682,7 +802,7 @@ Add these tests:
         module = load_server(
             {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
         )
-        backend = module.QwenDenseEmbeddingBackend(module.QWEN_DENSE_EMBEDDING_MODEL)
+        backend = module.embedding_service.qwen_dense_backend
         result = backend.embed_dense(["alpha"], normalize_dense=False)
         self.assertEqual(len(result["dense_vecs"][0]), 1024)
 
@@ -690,65 +810,50 @@ Add these tests:
         module = load_server(
             {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"}
         )
-        backend = module.QwenDenseEmbeddingBackend(module.QWEN_DENSE_EMBEDDING_MODEL)
+        backend = module.embedding_service.qwen_dense_backend
         result = backend.embed_dense(["alpha"], normalize_dense=True)
         self.assertEqual(len(result["dense_vecs"][0]), 1024)
         self.assertTrue(backend.model.last_dense_tensor.normalized)
-```
 
-Update `FakeEmbeddingModel.__call__` so the test can inspect the dense tensor:
-
-```python
-    def __call__(self, **inputs):
-        self.last_dense_tensor = FakeDenseTensor()
-        return types.SimpleNamespace(
-            last_hidden_state=FakeEmbeddingTensor(self.last_dense_tensor)
+    def test_qwen_dense_backend_wrong_dimension_raises_runtime_error(self):
+        module = load_server(
+            {
+                "DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+                "FAKE_QWEN_DENSE_DIM": "768",
+            }
         )
+        backend = module.embedding_service.qwen_dense_backend
+        with self.assertRaisesRegex(RuntimeError, "expected 1024"):
+            backend.embed_dense(["alpha"], normalize_dense=False)
+
+    def test_qwen_dense_load_failure_fails_server_startup(self):
+        with self.assertRaisesRegex(RuntimeError, "qwen dense load failed"):
+            load_server(
+                {
+                    "DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+                    "FAKE_QWEN_DENSE_LOAD_ERROR": "1",
+                }
+            )
 ```
 
-Update `FakeEmbeddingTensor`:
-
-```python
-class FakeEmbeddingTensor:
-    shape = (1, 1, 1024)
-
-    def __init__(self, dense_tensor):
-        self.dense_tensor = dense_tensor
-
-    def __getitem__(self, key):
-        return self.dense_tensor
-```
-
-Update `FakeDenseTensor`:
-
-```python
-class FakeDenseTensor:
-    shape = (1, 1024)
-
-    def __init__(self):
-        self.normalized = False
-
-    def detach(self):
-        return self
-
-    def cpu(self):
-        return self
-
-    def numpy(self):
-        return [[1.0] * 1024]
-```
-
-- [ ] **Step 3: Run Qwen backend tests and verify failure**
+- [ ] **Step 2: Run Qwen backend tests and verify failure**
 
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_returns_1024_dimension_vectors test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_applies_normalization_when_requested
+py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_returns_1024_dimension_vectors test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_applies_normalization_when_requested test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_wrong_dimension_raises_runtime_error test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_load_failure_fails_server_startup
 ```
 
-Expected: tests fail until `QwenDenseEmbeddingBackend` exists and uses `torch.nn.functional.normalize`.
+Expected: tests fail until `QwenDenseEmbeddingBackend` validates dimensions, normalizes through `torch.nn.functional.normalize`, and Qwen startup failure is allowed to propagate.
 
-- [ ] **Step 4: Adjust Qwen backend implementation**
+- [ ] **Step 3: Adjust Qwen backend implementation**
+
+Confirm the backend keeps left padding and includes this comment immediately before pooling:
+
+```python
+            # With left padding, -1 is the real final token for every row.
+            dense_vecs = outputs.last_hidden_state[:, -1, :]
+```
 
 Confirm `QwenDenseEmbeddingBackend.embed_dense()` contains this normalization block:
 
@@ -767,17 +872,17 @@ Confirm it validates vector size before returning:
                 )
 ```
 
-- [ ] **Step 5: Run Qwen backend tests and verify pass**
+- [ ] **Step 4: Run Qwen backend tests and verify pass**
 
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_returns_1024_dimension_vectors test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_applies_normalization_when_requested
+py -m unittest test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_returns_1024_dimension_vectors test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_applies_normalization_when_requested test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_backend_wrong_dimension_raises_runtime_error test_reranker_wrapper.RerankerWrapperTests.test_qwen_dense_load_failure_fails_server_startup
 ```
 
-Expected: both tests pass.
+Expected: all four tests pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 Run:
 
@@ -951,6 +1056,8 @@ Add this note near the reranker model note:
 
 ```markdown
 When `DENSE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B`, only dense vectors change. Sparse lexical weights and ColBERT vectors still come from `BAAI/bge-m3`, so mixed requests are supported through the same `/embeddings/` endpoint.
+
+The Qwen dense path intentionally does not add query/document instruction prefixes. This keeps the existing `/embeddings/` API transparent, but deployments optimizing retrieval quality should benchmark task-specific Qwen formatting separately before changing request semantics.
 ```
 
 - [ ] **Step 6: Commit**
@@ -975,7 +1082,7 @@ git commit -m "docs: document qwen dense embedding selection"
 Run:
 
 ```powershell
-py -m unittest test_reranker_wrapper.py
+py -m unittest test_reranker_wrapper
 ```
 
 Expected: all tests pass.
