@@ -270,6 +270,11 @@ in QDRANT-compatible format instead of the default token-id dict:
 
 Use with `SparseVector(indices=..., values=...)` when upserting to QDRANT.
 
+The active embedding backends are selected at server startup. With the default
+BGE dense backend, `dense`, `sparse`, and `colbert` all come from `BAAI/bge-m3`.
+With Qwen dense selected, only `dense` changes to `Qwen/Qwen3-Embedding-0.6B`;
+`sparse` and `colbert` still come from `BAAI/bge-m3`.
+
 **Response:**
 ```json
 {
@@ -371,6 +376,16 @@ curl "http://localhost:8000/health"
 ```
 
 Returns server status, GPU info, active embedding/reranker models, batch size.
+
+Relevant model fields:
+
+```json
+{
+  "model": "BAAI/bge-m3",
+  "dense_embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+  "reranker_model": "BAAI/bge-reranker-v2-m3"
+}
+```
 
 ---
 
@@ -484,7 +499,7 @@ Compose automatically loads `.env` in the same directory. `.env` is in `.gitigno
 | `embedding_queue_size` | Gauge | - |
 | `embedding_active_requests` | Gauge | - |
 | `embedding_gpu_memory_allocated_bytes` | Gauge | - |
-| `embedding_server_info` | Info | `model`, `version`, `gpu_available`, `device` |
+| `embedding_server_info` | Info | `model`, `dense_embedding_model`, `version`, `gpu_available`, `device` |
 
 ### Reranker
 
