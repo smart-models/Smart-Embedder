@@ -78,12 +78,65 @@ class FakeAutoModelForCausalLM:
         return FakeCausalLM()
 
 
+class FakeEmbeddingModel:
+    def __init__(self, dense_size=1024):
+        self.dense_size = dense_size
+        self.last_dense_tensor = None
+
+    def to(self, device):
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, **inputs):
+        self.last_dense_tensor = FakeDenseTensor(self.dense_size)
+        return types.SimpleNamespace(
+            last_hidden_state=FakeEmbeddingTensor(self.last_dense_tensor)
+        )
+
+
+class FakeAutoModel:
+    @classmethod
+    def from_pretrained(cls, model_name, **kwargs):
+        if os.getenv("FAKE_QWEN_DENSE_LOAD_ERROR") == "1":
+            raise RuntimeError("qwen dense load failed")
+        dense_size = int(os.getenv("FAKE_QWEN_DENSE_DIM", "1024"))
+        return FakeEmbeddingModel(dense_size)
+
+
 class FakeTensor:
     def __init__(self, value):
         self.value = value
 
     def to(self, device):
         return self
+
+
+class FakeEmbeddingTensor:
+    shape = (1, 1, 1024)
+
+    def __init__(self, dense_tensor):
+        self.dense_tensor = dense_tensor
+
+    def __getitem__(self, key):
+        return self.dense_tensor
+
+
+class FakeDenseTensor:
+    def __init__(self, dense_size=1024):
+        self.dense_size = dense_size
+        self.shape = (1, dense_size)
+        self.normalized = False
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return [[1.0] * self.dense_size]
 
 
 class FakeLogits:
@@ -102,7 +155,10 @@ class FakeTorchModule(types.ModuleType):
             device_count=lambda: 0,
         )
         self.nn = types.SimpleNamespace(
-            functional=types.SimpleNamespace(log_softmax=self._log_softmax)
+            functional=types.SimpleNamespace(
+                log_softmax=self._log_softmax,
+                normalize=self._normalize,
+            )
         )
 
     class _NoGrad:
@@ -120,6 +176,10 @@ class FakeTorchModule(types.ModuleType):
 
     def _log_softmax(self, values, dim=1):
         return FakeProbability()
+
+    def _normalize(self, value, p=2, dim=1):
+        value.normalized = True
+        return value
 
 
 class FakeProbability:
@@ -270,6 +330,7 @@ def load_server(env=None):
     fake_flag_embedding.FlagReranker = FakeFlagReranker
 
     fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoModel = FakeAutoModel
     fake_transformers.AutoTokenizer = FakeAutoTokenizer
     fake_transformers.AutoModelForCausalLM = FakeAutoModelForCausalLM
 
@@ -292,6 +353,24 @@ class RerankerWrapperTests(unittest.TestCase):
     def test_resolve_reranker_model_defaults_to_bge_for_invalid_value(self):
         module = load_server({"RERANKER_MODEL": "invalid"})
         self.assertEqual(module._resolve_reranker_model(), module.BGE_RERANKER_MODEL)
+
+    def test_resolve_dense_embedding_model_defaults_to_bge_for_invalid_value(self):
+        module = load_server()
+        with patch.dict(os.environ, {"DENSE_EMBEDDING_MODEL": "invalid"}):
+            self.assertEqual(
+                module._resolve_dense_embedding_model(), module.BGE_EMBEDDING_MODEL
+            )
+
+    def test_resolve_dense_embedding_model_accepts_qwen(self):
+        module = load_server()
+        with patch.dict(
+            os.environ,
+            {"DENSE_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B"},
+        ):
+            self.assertEqual(
+                module._resolve_dense_embedding_model(),
+                module.QWEN_DENSE_EMBEDDING_MODEL,
+            )
 
     def test_bge_backend_uses_flag_reranker_compute_score(self):
         module = load_server({"RERANKER_MODEL": "BAAI/bge-reranker-v2-m3"})

@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -42,6 +42,9 @@ logging.basicConfig(
 # Multi-GPU configuration (optional - set to None for single GPU)
 # Example: ['cuda:0', 'cuda:1'] for multi-GPU or None for single GPU
 MULTI_GPU_DEVICES = None  # Change this to enable multi-GPU support
+BGE_EMBEDDING_MODEL = "BAAI/bge-m3"
+QWEN_DENSE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+QWEN_DENSE_VECTOR_SIZE = 1024
 BGE_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 QWEN_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
 QWEN_RERANKER_INSTRUCTION = (
@@ -57,6 +60,10 @@ QWEN_RERANKER_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n
 SUPPORTED_RERANKER_MODELS = {
     BGE_RERANKER_MODEL,
     QWEN_RERANKER_MODEL,
+}
+SUPPORTED_DENSE_EMBEDDING_MODELS = {
+    BGE_EMBEDDING_MODEL,
+    QWEN_DENSE_EMBEDDING_MODEL,
 }
 
 # GPU detection and dynamic parameter configuration
@@ -143,6 +150,19 @@ def _resolve_reranker_model() -> str:
         f"Unsupported RERANKER_MODEL '{configured}', using {BGE_RERANKER_MODEL}"
     )
     return BGE_RERANKER_MODEL
+
+
+def _resolve_dense_embedding_model() -> str:
+    configured = os.getenv("DENSE_EMBEDDING_MODEL", BGE_EMBEDDING_MODEL).strip()
+    if configured in SUPPORTED_DENSE_EMBEDDING_MODELS:
+        return configured
+
+    logging.warning(
+        f"Unsupported DENSE_EMBEDDING_MODEL '{configured}', "
+        f"using {BGE_EMBEDDING_MODEL}"
+    )
+    return BGE_EMBEDDING_MODEL
+
 
 # --- Authentication ---
 # Bearer token for API access. Leave empty to disable authentication.
