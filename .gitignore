@@ -63,3 +63,12 @@ output/
 tmp/
 temp/
 *.tmp
+
+# Claude Code
+.claude/
+
+# Ruff cache
+.ruff_cache/
+
+# Docs (internal planning/specs)
+docs/
