@@ -11,7 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/app/model_cache \
-    HF_HUB_CACHE=/app/model_cache/hub
+    HF_HUB_CACHE=/app/model_cache/hub \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \

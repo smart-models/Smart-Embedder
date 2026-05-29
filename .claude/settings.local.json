@@ -6,7 +6,9 @@
       "PowerShell(py *)",
       "Bash(py -m unittest test_reranker_wrapper -v)",
       "Bash(py -m unittest test_reranker_wrapper)",
-      "Bash(py *)"
+      "Bash(py *)",
+      "WebSearch",
+      "WebFetch(domain:jonathanc.net)"
     ]
   }
 }

@@ -280,6 +280,16 @@ class RateLimiter:
                 del self.buckets[k]
 
 
+# --- Shared GPU executor ---
+# Single-worker pool shared by BOTH the embedding and rerank paths so that GPU
+# inference is serialized across endpoints. Two models are resident at once
+# (BGE-M3 + reranker, optionally + Qwen dense); letting their forward passes run
+# concurrently would sum their VRAM footprints and risk CUDA OOM on small GPUs.
+# The CUDA default stream already serializes kernels, so this costs ~no
+# throughput while bounding peak memory to the larger single model.
+GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+
 # --- 2. Model Wrapper ---
 
 
@@ -786,7 +796,9 @@ class RerankerWrapper:
 
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self.executor = ThreadPoolExecutor(max_workers=1)
+        # Shared single-worker GPU pool; serializes rerank inference against the
+        # embedding path so concurrent forward passes cannot double VRAM.
+        self.executor = GPU_EXECUTOR
         self._score_fn: Callable[[List[List[str]], bool], List[float]]
 
         if self.model_name == QWEN_RERANKER_MODEL:
@@ -819,7 +831,8 @@ class RerankerWrapper:
         # tokenizer.pad() does not raise. Required for batched scoring.
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        model_kwargs: Dict[str, Any] = {"torch_dtype": torch.float16} if has_cuda else {}
+        # transformers >=4.56 renamed `torch_dtype` to `dtype`; use the current name.
+        model_kwargs: Dict[str, Any] = {"dtype": torch.float16} if has_cuda else {}
         if has_cuda:
             try:
                 self.model = AutoModelForCausalLM.from_pretrained(
@@ -974,7 +987,9 @@ class RequestProcessor:
             maxsize=max_queue_size
         )  # BACKPRESSURE: Limited queue
         self.response_futures = {}
-        self.executor = ThreadPoolExecutor(max_workers=1)
+        # Shared single-worker GPU pool (also used by the reranker) so embedding
+        # and rerank inference never run concurrently on the device.
+        self.executor = GPU_EXECUTOR
         self.gpu_lock = asyncio.Semaphore(1)
         self.stats = stats
         self.is_shutting_down = False  # GRACEFUL SHUTDOWN: Flag

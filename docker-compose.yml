@@ -17,6 +17,8 @@ services:
     environment:
       HF_HOME: /app/model_cache
       HF_HUB_CACHE: /app/model_cache/hub
+      # Reduce CUDA fragmentation OOM on variable-length batches (single-GPU, no NCCL).
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       MAX_INPUT_LENGTH: ${MAX_INPUT_LENGTH:-2048}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-90}
       MAX_SENTENCES_PER_REQUEST: ${MAX_SENTENCES_PER_REQUEST:-128}
