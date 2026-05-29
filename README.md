@@ -1,4 +1,34 @@
-# BGE-M3 Embedding & Reranker Server
+# SMART EMBEDDER
+
+![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
+![CPU Support](https://img.shields.io/badge/CPU-Supported-lightgrey)
+![CUDA 12.6](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia&logoColor=white)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Latest-009688?logo=fastapi&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)
+
+**Smart Embedder** is a lightweight, self-hosted embedding server built for **hybrid search** pipelines. It runs entirely on your own hardware — on an **NVIDIA GPU** for high throughput, or on **CPU** when no GPU is available — with no cloud dependency and no data leaving your machine.
+
+Hybrid search combines dense vector similarity, sparse lexical matching (BM25-style), and optional ColBERT late-interaction scoring into a single retrieval pipeline. Smart Embedder exposes all three vector types from a single endpoint, plus a reranking endpoint to re-score candidate passages after retrieval — everything a hybrid search stack needs in one lightweight service.
+
+The server is built on FastAPI and wraps [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3), a single model that produces dense, sparse, and ColBERT vectors simultaneously. The default stack uses BGE-M3 for all vector types and bge-reranker-v2-m3 for reranking — a solid baseline that runs on 8 GB VRAM or CPU with no extra configuration. **For higher retrieval quality**, Smart Embedder offers two optional upgrades selectable independently at startup:
+
+- **Dense embedding → [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B):** replaces only the dense vector path; sparse and ColBERT vectors still come from BGE-M3, keeping the full hybrid signal intact.
+- **Reranking → [Qwen3-Reranker-0.6B](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B):** replaces the cross-encoder reranker with a stronger model at the cost of higher inference time.
+
+Both Qwen models are still compact (0.6B parameters) but benefit from a dedicated GPU — a machine with 8 GB+ VRAM will see the best results. CPU execution remains supported for both, with conservative batch sizes applied automatically.
+
+**Key properties at a glance:**
+
+| Property | Detail |
+|---|---|
+| **Deployment** | Local — GPU (NVIDIA CUDA) or CPU, Docker or Python venv |
+| **Hybrid search vectors** | Dense + sparse lexical + ColBERT from one model, one endpoint |
+| **Reranking** | Cross-encoder passage reranking, same service |
+| **Footprint** | BGE-M3 + reranker fit in 8 GB VRAM; CPU mode needs no GPU |
+| **QDRANT-ready** | Sparse vectors in native `{indices, values}` format via `sparse_as_indices` |
+
+---
 
 High-performance FastAPI server for BGE-M3 embeddings and selectable reranking:
 
