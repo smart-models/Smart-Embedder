@@ -10,7 +10,8 @@ services:
     init: true
     ports:
       # Bind localhost only; remove the 127.0.0.1: prefix to expose on LAN.
-      - "127.0.0.1:8000:8000"
+      # PORT sets the published host port (default 8000); container stays on 8000.
+      - "127.0.0.1:${PORT:-8000}:8000"
     volumes:
       # Persist the HF model cache to avoid re-downloads on restart (~3 GB).
       - hf_model_cache:/app/model_cache

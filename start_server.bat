@@ -11,6 +11,13 @@ set "DEVICE=%~2"
 if "%MODE%"=="" set "MODE=docker"
 if "%DEVICE%"=="" set "DEVICE=auto"
 if "%HOST%"=="" set "HOST=0.0.0.0"
+REM PORT: shell env wins; else read from .env; else default 8000.
+if "%PORT%"=="" if exist ".env" (
+    for /f "usebackq tokens=1,* delims==" %%K in (".env") do (
+        if /I "%%K"=="PORT" set "PORT=%%L"
+    )
+)
+if "%PORT%"=="" set "PORT=8000"
 
 REM Lowercase normalize
 for %%A in (LOCAL local Local) do if /I "%MODE%"=="%%A" set "MODE=local"
@@ -30,7 +37,7 @@ echo Do you want dense embeddings to use:
 echo   [1] BGE  ^(BAAI/bge-m3^)
 echo   [2] QWEN ^(Qwen/Qwen3-Embedding-0.6B^)
 echo.
-set /p dense_choice="Enter choice ^(1 or 2^): "
+set /p dense_choice="Enter choice (1 or 2): "
 if "%dense_choice%"=="2" (
     set "DENSE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B"
 ) else (
@@ -47,7 +54,7 @@ echo Do you want to use:
 echo   [1] BGE  ^(BAAI/bge-reranker-v2-m3^)
 echo   [2] QWEN ^(Qwen/Qwen3-Reranker-0.6B^)
 echo.
-set /p reranker_choice="Enter choice ^(1 or 2^): "
+set /p reranker_choice="Enter choice (1 or 2): "
 if "%reranker_choice%"=="2" (
     set "RERANKER_MODEL=Qwen/Qwen3-Reranker-0.6B"
 ) else (
@@ -73,7 +80,7 @@ echo Do you want to run with:
 echo   [1] GPU ^(faster inference^)
 echo   [2] CPU ^(compatible with all systems^)
 echo.
-set /p choice="Enter choice ^(1 or 2^): "
+set /p choice="Enter choice (1 or 2): "
 if "%choice%"=="1" (
     set "DEVICE=gpu"
 ) else if "%choice%"=="2" (
@@ -163,13 +170,13 @@ if exist ".env" (
 )
 
 echo [INFO] Binding host: %HOST%
-echo [INFO] Starting server at http://localhost:8000
-echo [INFO] Docs:    http://localhost:8000/docs
-echo [INFO] Metrics: http://localhost:8000/metrics
+echo [INFO] Starting server at http://localhost:%PORT%
+echo [INFO] Docs:    http://localhost:%PORT%/docs
+echo [INFO] Metrics: http://localhost:%PORT%/metrics
 echo Press Ctrl+C to stop
 echo.
 
-uvicorn %UVICORN_ENV_ARGS% bge-m3_server:app --host "%HOST%" --port 8000
+uvicorn %UVICORN_ENV_ARGS% bge-m3_server:app --host "%HOST%" --port %PORT%
 echo.
 echo [INFO] Server stopped
 pause
@@ -219,9 +226,9 @@ if errorlevel 1 (
 
 echo.
 echo [INFO] Container started. Endpoints:
-echo   http://localhost:8000/health
-echo   http://localhost:8000/docs
-echo   http://localhost:8000/metrics
+echo   http://localhost:%PORT%/health
+echo   http://localhost:%PORT%/docs
+echo   http://localhost:%PORT%/metrics
 echo.
 echo [INFO] Tail logs: docker compose %COMPOSE_FILES% logs -f
 echo [INFO] Stop:      docker compose %COMPOSE_FILES% down

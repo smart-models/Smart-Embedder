@@ -12,6 +12,9 @@ cd "$SCRIPT_DIR"
 MODE="${1:-docker}"
 DEVICE="${2:-auto}"
 HOST="${HOST:-0.0.0.0}"
+# PORT: shell env wins; else read from .env; else default 8000.
+PORT="${PORT:-$(grep -E '^[[:space:]]*PORT=' .env 2>/dev/null | tail -n1 | cut -d= -f2 | sed 's/#.*//; s/[[:space:]]//g; s/"//g')}"
+PORT="${PORT:-8000}"
 
 # Normalize to lowercase
 MODE=$(echo "$MODE" | tr '[:upper:]' '[:lower:]')
@@ -279,13 +282,13 @@ if [[ "$MODE" == "local" ]]; then
     fi
 
     echo "[INFO] Binding host: $HOST"
-    echo "[INFO] Starting server at http://localhost:8000"
-    echo "[INFO] Docs:    http://localhost:8000/docs"
-    echo "[INFO] Metrics: http://localhost:8000/metrics"
+    echo "[INFO] Starting server at http://localhost:$PORT"
+    echo "[INFO] Docs:    http://localhost:$PORT/docs"
+    echo "[INFO] Metrics: http://localhost:$PORT/metrics"
     echo "Press Ctrl+C to stop"
     echo ""
 
-    uvicorn "${UVICORN_ENV_ARGS[@]}" bge-m3_server:app --host "$HOST" --port 8000
+    uvicorn "${UVICORN_ENV_ARGS[@]}" bge-m3_server:app --host "$HOST" --port "$PORT"
     echo ""
     echo "[INFO] Server stopped"
     read -r -p "Press Enter to exit..."
@@ -330,9 +333,9 @@ if [[ "$MODE" == "docker" ]]; then
 
     echo ""
     echo "[INFO] Container started. Endpoints:"
-    echo "  http://localhost:8000/health"
-    echo "  http://localhost:8000/docs"
-    echo "  http://localhost:8000/metrics"
+    echo "  http://localhost:$PORT/health"
+    echo "  http://localhost:$PORT/docs"
+    echo "  http://localhost:$PORT/metrics"
     echo ""
     echo "[INFO] Tail logs: docker compose $COMPOSE_FILES logs -f"
     echo "[INFO] Stop:      docker compose $COMPOSE_FILES down"

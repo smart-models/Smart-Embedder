@@ -216,12 +216,24 @@ if torch.cuda.is_available():
 
 ### Exposure on Local Network
 
-By default the server is bound to `127.0.0.1:8000` (localhost only).  
-For LAN access modify `docker-compose.yml`:
+By default the server is bound to `127.0.0.1:8000` (localhost only).
+
+To change the exposed port (e.g. 8000 already in use), set `PORT` in `.env` or
+shell before startup. Docker remaps the published host port; the container stays
+on 8000 internally:
+
+```bash
+PORT=8001 docker compose up -d
+# or persistent: add PORT=8001 to .env
+```
+
+In `local` mode the launcher passes `PORT` to `uvicorn --port`.
+
+For LAN access modify `docker-compose.yml` (remove the `127.0.0.1:` bind prefix):
 
 ```yaml
 ports:
-  - "8000:8000"
+  - "${PORT:-8000}:8000"
 ```
 
 > Warning: If exposed on network, add a reverse proxy with authentication
@@ -428,6 +440,7 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 
 | Env var | Default | Description |
 |---|---|---|
+| `PORT` | `8000` | Host port to expose. Docker: published host port (container stays on 8000). Local: `uvicorn --port`. Set in `.env` or shell if 8000 is taken |
 | `MAX_INPUT_LENGTH` | `2048` | Max tokens per sequence |
 | `REQUEST_TIMEOUT` | `90` | Global HTTP timeout (sec); keep above `RERANK_GPU_TIMEOUT` |
 | `MAX_SENTENCES_PER_REQUEST` | `128` | Max sentences per embedding request |
