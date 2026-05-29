@@ -446,6 +446,7 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 | `RERANK_GPU_TIMEOUT` | `60` | Hard timeout for a single rerank inference (sec); keep below `REQUEST_TIMEOUT` |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | `3600` | Rate limit per IP (60 req/s) |
 | `RATE_LIMIT_BURST_SIZE` | `120` | Token bucket burst (~2s of traffic) |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | CUDA caching-allocator config; reduces fragmentation OOM on variable-length batches (single-GPU, no NCCL). Set in `Dockerfile` and `docker-compose.yml` |
 
 With `API_TOKEN` set, all non-public endpoints require:
 
@@ -615,9 +616,16 @@ scrape_configs:
 - **Limit**: `RATE_LIMIT_REQUESTS_PER_MINUTE=3600` req/min, `RATE_LIMIT_BURST_SIZE=120`
 - **Response**: HTTP `429` with header `Retry-After: 60`
 
+### GPU Execution
+- Embedding and rerank inference share a **single-worker GPU executor**, so the
+  two paths never run forward passes concurrently. This bounds peak VRAM to the
+  larger resident model instead of the sum, preventing concurrency-driven CUDA
+  OOM on small GPUs. The CUDA default stream already serializes kernels, so this
+  costs effectively no throughput.
+
 ### Backpressure
 - **/embeddings/ queue max**: `MAX_QUEUE_SIZE=200`
-- **/rerank slots max**: `RERANK_MAX_QUEUE=32` (concurrency bound on reranker single-worker executor)
+- **/rerank slots max**: `RERANK_MAX_QUEUE=32` (admission bound on the shared single-worker GPU executor)
 - **Acquire timeout**: 0.5s
 - Rejections are reflected in both `/stats` (`rejected_requests`) and Prometheus (`embedding_requests_rejected_total` or `rerank_requests_rejected_total`, depending on endpoint).
 - Rate limit uses direct connection IP (`request.client.host`). If the server is behind a trusted reverse proxy, update the middleware to extract IP from `X-Forwarded-For`.
@@ -632,7 +640,7 @@ scrape_configs:
 - Blocks new requests (middleware)
 - Waits for queue drain
 - Completes in-flight requests (max 30s)
-- Cancels processing loop and closes thread pools
+- Cancels processing loop and closes the shared GPU executor
 
 ---
 
