@@ -243,13 +243,19 @@ echo ""
 
 # Run local mode
 if [[ "$MODE" == "local" ]]; then
+    # Pick CPU-only requirements when running without GPU to avoid the CUDA torch wheel.
+    REQ_FILE="requirements-gpu.txt"
+    if [[ "$DEVICE" == "cpu" ]]; then
+        REQ_FILE="requirements-cpu.txt"
+    fi
+
     if [[ ! -f ".venv/bin/activate" ]]; then
         echo "[ERROR] Virtual environment not found!"
         echo ""
         echo "Create it first:"
         echo "  python -m venv .venv"
         echo "  source .venv/bin/activate"
-        echo "  pip install -r requirements.txt"
+        echo "  pip install -r $REQ_FILE"
         echo ""
         read -r -p "Press Enter to exit..."
         exit 1
@@ -260,7 +266,7 @@ if [[ "$MODE" == "local" ]]; then
 
     if ! python -c "import uvicorn, dotenv" 2>/dev/null; then
         echo "[ERROR] uvicorn or python-dotenv not found. Installing dependencies..."
-        if ! pip install -r requirements.txt; then
+        if ! pip install -r $REQ_FILE; then
             echo "[ERROR] Failed to install dependencies"
             read -r -p "Press Enter to exit..."
             exit 1
@@ -303,7 +309,7 @@ if [[ "$MODE" == "docker" ]]; then
         exit 1
     fi
 
-    COMPOSE_FILES="-f docker-compose.yml"
+    COMPOSE_FILES="-f docker-compose.gpu.yml"
     
     if [[ "$DEVICE" == "cpu" ]]; then
         if [[ ! -f "docker-compose.cpu.yml" ]]; then
@@ -311,7 +317,7 @@ if [[ "$MODE" == "docker" ]]; then
             read -r -p "Press Enter to exit..."
             exit 1
         fi
-        COMPOSE_FILES="-f docker-compose.yml -f docker-compose.cpu.yml"
+        COMPOSE_FILES="-f docker-compose.gpu.yml -f docker-compose.cpu.yml"
         echo "[INFO] Compose overlay: cpu"
     else
         echo "[INFO] Compose overlay: gpu (nvidia runtime)"

@@ -127,13 +127,16 @@ if "%MODE%"=="docker" goto :run_docker
 goto :run_local
 
 :run_local
+REM Pick CPU-only requirements when running without GPU to avoid the CUDA torch wheel.
+set "REQ_FILE=requirements-gpu.txt"
+if "%DEVICE%"=="cpu" set "REQ_FILE=requirements-cpu.txt"
 if not exist ".venv\Scripts\activate.bat" (
     echo [ERROR] Virtual environment not found!
     echo.
     echo Create it first:
     echo   python -m venv .venv
     echo   .venv\Scripts\activate
-    echo   pip install -r requirements.txt
+    echo   pip install -r %REQ_FILE%
     echo.
     pause
     set "EXIT_CODE=1"
@@ -146,7 +149,7 @@ call .venv\Scripts\activate.bat
 python -c "import uvicorn, dotenv" 2>nul
 if errorlevel 1 (
     echo [ERROR] uvicorn or python-dotenv not found. Installing dependencies...
-    pip install -r requirements.txt
+    pip install -r %REQ_FILE%
     if errorlevel 1 (
         echo [ERROR] Failed to install dependencies
         pause
@@ -192,7 +195,7 @@ if errorlevel 1 (
     goto :exit
 )
 
-set "COMPOSE_FILES=-f docker-compose.yml"
+set "COMPOSE_FILES=-f docker-compose.gpu.yml"
 if "%DEVICE%"=="cpu" (
     if not exist "docker-compose.cpu.yml" (
         echo [ERROR] docker-compose.cpu.yml missing
@@ -200,7 +203,7 @@ if "%DEVICE%"=="cpu" (
         set "EXIT_CODE=1"
         goto :exit
     )
-    set "COMPOSE_FILES=-f docker-compose.yml -f docker-compose.cpu.yml"
+    set "COMPOSE_FILES=-f docker-compose.gpu.yml -f docker-compose.cpu.yml"
     echo [INFO] Compose overlay: cpu
 ) else (
     echo [INFO] Compose overlay: gpu ^(nvidia runtime^)

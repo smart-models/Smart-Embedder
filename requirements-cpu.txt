@@ -1,0 +1,33 @@
+# CPU-only dependency set. Mirror of requirements-gpu.txt with a CPU PyTorch wheel.
+# Use when no NVIDIA GPU is present: pip install -r requirements-cpu.txt
+# Keep every non-torch pin identical to requirements-gpu.txt.
+
+# FastAPI and web server
+fastapi==0.136.1
+uvicorn[standard]==0.34.1
+pydantic==2.12.5
+
+# BGE models. Keep this pin: 1.3+ regresses reranker performance.
+# Verify performance before upgrading.
+# Issue: https://github.com/FlagOpen/FlagEmbedding/issues/1233
+FlagEmbedding==1.2.10
+sentence-transformers==2.7.0
+
+# Monitoring
+prometheus-client==0.25.0
+
+# Test
+httpx==0.28.1
+
+# Hugging Face stack compatible with FlagEmbedding 1.2.10 and torch 2.7.0
+numpy==1.26.4
+transformers==4.57.3
+peft==0.15.2
+tokenizers==0.22.2
+
+# PyTorch CPU-only (stable 2.7.0). Same version as the GPU build; only the
+# build tag differs (+cpu instead of +cu126), so FlagEmbedding 1.2.10 stays compatible.
+# Dockerfile.cpu installs torch in a separate layer first; this entry is then a no-op
+# for Docker but ensures local `pip install -r requirements-cpu.txt` pulls the CPU wheel.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.7.0+cpu

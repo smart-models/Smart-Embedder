@@ -50,7 +50,8 @@ High-performance FastAPI server for BGE-M3 embeddings and selectable reranking:
 ```bat
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements-gpu.txt
+REM CPU-only machine instead: pip install -r requirements-cpu.txt
 ```
 
 ### 2. Start the Server
@@ -71,7 +72,7 @@ start_server.bat [local|docker] [cpu|gpu|auto]
 | `start_server.bat docker auto` | Docker startup with device auto-detection |
 | `start_server.bat local gpu` | Local venv, CUDA auto-detect |
 | `start_server.bat local cpu` | Local venv, forces CPU (`CUDA_VISIBLE_DEVICES=-1`) |
-| `start_server.bat docker gpu` | `docker compose build && up -d` with NVIDIA runtime |
+| `start_server.bat docker gpu` | `docker compose -f docker-compose.gpu.yml build && up -d` with NVIDIA runtime |
 | `start_server.bat docker cpu` | Compose with override `docker-compose.cpu.yml` (no GPU) |
 
 Arguments are case-insensitive. Built-in validation: unrecognized parameters print usage and exit with code 1.
@@ -90,10 +91,10 @@ variables or `.env`, falling back to BGE defaults.
 **`docker` mode**: requires Docker Desktop / Engine in PATH. The script builds the image and starts the container in background. For logs:
 
 ```bat
-docker compose logs -f embedder
+docker compose -f docker-compose.gpu.yml logs -f embedder
 ```
 
-In Docker Desktop the project appears as **bge-m3-embedder-reranker**.
+In Docker Desktop the project appears as **smart-embedder** (containers `smart-embedder-gpu` / `smart-embedder-cpu`).
 
 Or directly without wrapper:
 
@@ -154,7 +155,7 @@ python benchmark.py --concurrency 8 --requests 100 --batch-size 4
 
 > Note: Default rate limits (3600 req/min, burst 120) are tuned for benchmarks
 > on a single client at `conc<=16`. For extreme stress testing:
-> `RATE_LIMIT_REQUESTS_PER_MINUTE=1000000 docker compose up -d`.
+> `RATE_LIMIT_REQUESTS_PER_MINUTE=1000000 docker compose -f docker-compose.gpu.yml up -d`.
 
 Output: ASCII table with `Reqs / OK / Fail / Conc / Wall / Req/s / Units/s / Avg / P50 / P95 / P99 / Min / Max`.
 
@@ -187,13 +188,13 @@ sudo systemctl restart docker
 docker pull nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
 # Build and GPU startup (first time: downloads selected embedding and reranker models)
-docker compose up --build
+docker compose -f docker-compose.gpu.yml up --build
 
 # Or via bat wrapper (Windows)
 start_server.bat docker gpu
 
 # CPU execution (compose override)
-docker compose -f docker-compose.yml -f docker-compose.cpu.yml up --build
+docker compose -f docker-compose.gpu.yml -f docker-compose.cpu.yml up --build
 # Equivalent:
 start_server.bat docker cpu
 ```
@@ -206,7 +207,7 @@ INFO - Server ready to accept requests
 
 Server available at `http://localhost:8000`.  
 Models are saved in the default named volume
-`bge-m3-embedder-reranker-hf-cache` and mounted at `/app/model_cache`;
+`smart-embedder-hf-cache` and mounted at `/app/model_cache`;
 subsequent restarts do not re-download them.
 
 The first Docker startup with QWEN selected downloads the selected Qwen model
@@ -217,25 +218,25 @@ cache; later runs reuse the cached model.
 
 ```bash
 # Startup in background
-docker compose up -d
+docker compose -f docker-compose.gpu.yml up -d
 
 # Real-time logs
-docker compose logs -f embedder
+docker compose -f docker-compose.gpu.yml logs -f embedder
 
 # Stop
-docker compose down
+docker compose -f docker-compose.gpu.yml down
 
-# Rebuild after code changes (deps cached if requirements.txt unchanged)
-docker compose up --build
+# Rebuild after code changes (deps cached if requirements-gpu.txt unchanged)
+docker compose -f docker-compose.gpu.yml up --build
 
 # Complete rebuild from scratch
-docker compose build --no-cache
+docker compose -f docker-compose.gpu.yml build --no-cache
 ```
 
 ### Verify GPU in Container
 
 ```bash
-docker compose run --rm embedder python3 -c "
+docker compose -f docker-compose.gpu.yml run --rm embedder python3 -c "
 import torch
 print('PyTorch:', torch.__version__)
 print('CUDA available:', torch.cuda.is_available())
@@ -253,13 +254,13 @@ shell before startup. Docker remaps the published host port; the container stays
 on 8000 internally:
 
 ```bash
-PORT=8001 docker compose up -d
+PORT=8001 docker compose -f docker-compose.gpu.yml up -d
 # or persistent: add PORT=8001 to .env
 ```
 
 In `local` mode the launcher passes `PORT` to `uvicorn --port`.
 
-For LAN access modify `docker-compose.yml` (remove the `127.0.0.1:` bind prefix):
+For LAN access modify `docker-compose.gpu.yml` (remove the `127.0.0.1:` bind prefix):
 
 ```yaml
 ports:
@@ -276,10 +277,12 @@ ports:
 | File | Description |
 |---|---|
 | `bge-m3_server.py` | Main server |
-| `requirements.txt` | Python dependencies |
-| `Dockerfile` | Docker image build (CUDA 12.6, non-root, hardened) |
-| `docker-compose.yml` | Container orchestration with GPU and model volume |
-| `docker-compose.cpu.yml` | Compose override: removes GPU reservation for CPU execution |
+| `requirements-gpu.txt` | Python dependencies (GPU / CUDA PyTorch wheel) |
+| `requirements-cpu.txt` | Python dependencies (CPU-only PyTorch wheel) |
+| `Dockerfile.gpu` | GPU image build (CUDA 12.6, non-root, hardened) |
+| `Dockerfile.cpu` | CPU-only image build (slim Python base, no CUDA) |
+| `docker-compose.gpu.yml` | Container orchestration with GPU and model volume |
+| `docker-compose.cpu.yml` | Compose override: slim CPU image, removes GPU reservation |
 | `.env.example` | Environment variables template (copy to `.env` for local override) |
 | `.dockerignore` | Excludes `.venv`, cache, docs from build context |
 | `start_server.bat` | Windows startup script parameterized (`local\|docker` x `cpu\|gpu\|auto`) |
@@ -466,7 +469,7 @@ Use the **Authorize** button and enter only the token, without `Bearer` prefix.
 
 ## Configuration
 
-Limits are tunable via **environment variable** (override in `docker-compose.yml` or shell before startup):
+Limits are tunable via **environment variable** (override in `docker-compose.gpu.yml` or shell before startup):
 
 | Env var | Default | Description |
 |---|---|---|
@@ -489,7 +492,7 @@ Limits are tunable via **environment variable** (override in `docker-compose.yml
 | `RERANK_GPU_TIMEOUT` | `60` | Hard timeout for a single rerank inference (sec); keep below `REQUEST_TIMEOUT` |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | `3600` | Rate limit per IP (60 req/s) |
 | `RATE_LIMIT_BURST_SIZE` | `120` | Token bucket burst (~2s of traffic) |
-| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | CUDA caching-allocator config; reduces fragmentation OOM on variable-length batches (single-GPU, no NCCL). Set in `Dockerfile` and `docker-compose.yml` |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | CUDA caching-allocator config; reduces fragmentation OOM on variable-length batches (single-GPU, no NCCL). Set in `Dockerfile.gpu` and `docker-compose.gpu.yml` |
 
 With `API_TOKEN` set, all non-public endpoints require:
 
@@ -527,11 +530,11 @@ Override:
 
 ```bash
 # Ad-hoc (shell env)
-RATE_LIMIT_REQUESTS_PER_MINUTE=10000 docker compose up -d
+RATE_LIMIT_REQUESTS_PER_MINUTE=10000 docker compose -f docker-compose.gpu.yml up -d
 
 # Persistent - copy .env.example to .env and modify
 cp .env.example .env
-docker compose up -d
+docker compose -f docker-compose.gpu.yml up -d
 ```
 
 Compose automatically loads `.env` in the same directory. `.env` is in `.gitignore`; `.env.example` is the versioned template.
@@ -635,7 +638,7 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: 'bge-m3-embedder-reranker'
+  - job_name: 'smart-embedder'
     static_configs:
       - targets: ['localhost:8000']
     metrics_path: '/metrics'
@@ -693,7 +696,7 @@ scrape_configs:
 
 ```bat
 python -c "import torch; print(torch.cuda.is_available())"
-pip install -r requirements.txt --upgrade
+pip install -r requirements-gpu.txt --upgrade
 ```
 
 ### `429 Too Many Requests` Errors
@@ -724,10 +727,10 @@ If it fails: reinstall NVIDIA Container Toolkit and restart Docker.
 ```
 Error: manifest for nvidia/cuda:12.6.3-runtime-ubuntu22.04 not found
 ```
-Search correct tag on [hub.docker.com/r/nvidia/cuda/tags](https://hub.docker.com/r/nvidia/cuda/tags) and update first line of `Dockerfile`.
+Search correct tag on [hub.docker.com/r/nvidia/cuda/tags](https://hub.docker.com/r/nvidia/cuda/tags) and update first line of `Dockerfile.gpu`.
 
 ### Docker: Container Unhealthy on First Startup
-Default Compose and Dockerfile healthchecks allow a 300s startup period for
+Default Compose and Dockerfile.gpu healthchecks allow a 300s startup period for
 first-run model downloads. On slow networks or empty caches, increase the
 healthcheck start period above 300s in your custom Compose override:
 ```yaml

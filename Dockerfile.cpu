@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1.7
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
+# CPU-only image. Mirror of Dockerfile.gpu on a slim Python base instead of the
+# nvidia/cuda runtime, with the CPU PyTorch wheel. ~2.5 GB smaller.
+FROM python:3.11-slim
 
-LABEL org.opencontainers.image.title="smart-embedder-gpu" \
-      org.opencontainers.image.description="Smart Embedder: BGE-M3 embedding + reranker FastAPI server (GPU/CUDA)" \
+LABEL org.opencontainers.image.title="smart-embedder-cpu" \
+      org.opencontainers.image.description="Smart Embedder: BGE-M3 embedding + reranker FastAPI server (CPU-only)" \
       org.opencontainers.image.source="https://github.com/FlagOpen/FlagEmbedding"
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -11,13 +13,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/app/model_cache \
-    HF_HUB_CACHE=/app/model_cache/hub \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    HF_HUB_CACHE=/app/model_cache/hub
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        python3-dev \
         ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -29,14 +27,14 @@ RUN groupadd --gid 1000 appuser \
 
 WORKDIR /app
 
-# PyTorch isolated layer: heavy, cached separately from app dependencies
+# PyTorch CPU isolated layer: heavy, cached separately from app dependencies
 RUN python3 -m pip install \
-        --extra-index-url https://download.pytorch.org/whl/cu126 \
-        torch==2.7.0+cu126
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        torch==2.7.0+cpu
 
-COPY --chown=appuser:appuser requirements-gpu.txt .
+COPY --chown=appuser:appuser requirements-cpu.txt .
 
-RUN python3 -m pip install -r requirements-gpu.txt
+RUN python3 -m pip install -r requirements-cpu.txt
 
 COPY --chown=appuser:appuser bge-m3_server.py .
 

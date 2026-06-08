@@ -24,6 +24,6 @@ test_server.py
 start_server.bat
 README.md
 *.md
-Dockerfile
-docker-compose.yml
+Dockerfile*
+docker-compose*.yml
 .dockerignore

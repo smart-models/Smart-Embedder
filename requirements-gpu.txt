@@ -22,8 +22,8 @@ peft==0.15.2
 tokenizers==0.22.2
 
 # PyTorch with CUDA 12.6 support (stable 2.7.0)
-# Dockerfile installs torch in a separate layer first; this entry is then a no-op for Docker
-# but ensures local `pip install -r requirements.txt` pulls the correct CUDA wheel.
-# For CPU-only local install, override with: pip install torch==2.7.0
+# Dockerfile.gpu installs torch in a separate layer first; this entry is then a no-op for Docker
+# but ensures local `pip install -r requirements-gpu.txt` pulls the correct CUDA wheel.
+# For CPU-only local install, use requirements-cpu.txt instead.
 --extra-index-url https://download.pytorch.org/whl/cu126
 torch==2.7.0+cu126

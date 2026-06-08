@@ -1,12 +1,12 @@
-name: bge-m3-embedder-reranker
+name: smart-embedder
 
 services:
   embedder:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: bge-m3-embedder-reranker:latest
-    container_name: bge-m3-embedder-reranker
+      dockerfile: Dockerfile.gpu
+    image: smart-embedder:gpu
+    container_name: smart-embedder-gpu
     init: true
     ports:
       # Bind localhost only; remove the 127.0.0.1: prefix to expose on LAN.
@@ -71,4 +71,4 @@ services:
 
 volumes:
   hf_model_cache:
-    name: ${HF_MODEL_CACHE_VOLUME:-bge-m3-embedder-reranker-hf-cache}
+    name: ${HF_MODEL_CACHE_VOLUME:-smart-embedder-hf-cache}

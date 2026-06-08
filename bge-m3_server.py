@@ -71,6 +71,10 @@ has_cuda = torch.cuda.is_available()
 device = "cuda" if has_cuda else "cpu"
 available_gpus = torch.cuda.device_count() if has_cuda else 0
 
+# Application version and device-aware display name (Swagger title, /metrics info).
+APP_VERSION = "1.1.0"
+APP_NAME = f"Smart Embedder {'GPU' if has_cuda else 'CPU'}"
+
 
 # Server configuration parameters (env-tunable)
 def _env_int_range(
@@ -1367,8 +1371,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="BGE-M3 Embedder & Reranker Server",
-    version="1.0.0",
+    title=APP_NAME,
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -1402,7 +1406,7 @@ server_info.info(
     {
         "model": BGE_EMBEDDING_MODEL,
         "dense_embedding_model": embedding_service.dense_model_name,
-        "version": "1.0.0",
+        "version": APP_VERSION,
         "gpu_available": str(has_cuda),
         "device": device,
     }
